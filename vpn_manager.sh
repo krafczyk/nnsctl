@@ -1,68 +1,119 @@
 #!/bin/bash
 
-NAMESPACE="myvpn"
-PORT=""
-veth0="veth0"
-veth1="veth1"
-VPN_PID=0
+NS_NAME="myvpn"
+NS_EXEC="sudo -E ip netns exec $NS_NAME"
+VPN_USER="mkrafcz2"
+#PORT=""
+WIRED_IF="enp5s0" # We may need to add additional interfaces.
+OUT_IF="${NS_NAME}0"
+IN_IF="${NS_NAME}1"
+OUT_IP=192.168.1.1
+IN_IP=192.168.1.2
+vpn_pid_file="vpn.pid"
+vpn_interface="vpn0"
+
+# Save current state of IP forwarding
 IP_FORWARD_ORIG=$(cat /proc/sys/net/ipv4/ip_forward)
+
+# Validation on whether the namespace exists
+if sudo ip netns list | grep -q $NAMESPACE; then
+    echo "Namespace $NAMESPACE already exists"
+    exit 1
+fi
+
+# Check whether the pid file is available
+if [ -e "$vpn_pid_file" ]; then
+    echo "VPN process already running"
+    exit 1
+fi
 
 setup_vpn() {
     # Create network namespace
-    sudo ip netns add $NAMESPACE
+    echo "Creating network namespace ${NS_NAME}"
+    sudo ip netns add $NS_NAME
 
-    # Create veth pair and move veth1 to namespace
-    sudo ip link add $veth0 type veth peer name $veth1
-    sudo ip link set $veth1 netns $NAMESPACE
+    echo "after namespace setup:"
+    sudo ip netns list
+
+    # Create network interface pair and move $IN_IF to namespace
+    echo "Creating network interface pair"
+    sudo ip link add $OUT_IF type veth peer name $IN_IF
+    sudo ip link set $OUT_IF up
+    sudo ip link set $IN_IF netns $NS_NAME
+
+    echo "after veth creation"
+    sudo ip link list
 
     # Configure IP addresses and bring up interfaces
-    sudo ip addr add 192.168.1.1/24 dev $veth0
-    sudo ip link set $veth0 up
-    sudo ip netns exec $NAMESPACE ip addr add 192.168.1.2/24 dev $veth1
-    sudo ip netns exec $NAMESPACE ip link set $veth1 up
-    sudo ip netns exec $NAMESPACE ip route add default via 192.168.1.1
+    echo "Configuring IP addresses and routing"
+    sudo ip addr add $OUT_IP/24 dev $OUT_IF
+    $NS_EXEC ip addr add $IN_IP/24 dev $IN_IF
+    $NS_EXEC ip link set $IN_IF up
+    $NS_EXEC ip route add default via $OUT_IP dev $IN_IF
 
-    # Enable IP forwarding and NAT
-    sudo iptables -A FORWARD -o $veth0 -i tun0 -j ACCEPT
-    sudo iptables -t nat -A POSTROUTING -o tun0 -j MASQUERADE
-
-    # Set up port forwarding
-    if [[ -n "$PORT" && "$PORT" -ge 1 && "$PORT" -le 65535 ]]; then
-        sudo iptables -t nat -A PREROUTING -p tcp --dport $PORT -j DNAT --to-destination 192.168.1.2:$PORT
-    fi
-
+    # Ensure IP forwarding is enabled
     if [ "$IP_FORWARD_ORIG" -eq 0 ]; then
+        echo "Enabling IP Forwarding"
         echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
     fi
 
+    # Configure the nameserver to use inside the namespace
+    # TODO use VPN-provided DNS servers in order to prevent leaks
+    echo "Configuring DNS nameserver"
+    sudo mkdir -p /etc/netns/${NS_NAME}
+    sudo cp /etc/resolv.conf /etc/netns/${NS_NAME}
+
     # Run OpenConnect in the namespace
-    sudo ip netns exec $NAMESPACE openconnect --protocol=anyconnect vpn.illinois.edu &
-    VPN_PID=$!
+    echo "Starting VPN..."
+    $NS_EXEC openconnect -b --interface $vpn_interface --pid-file=$vpn_pid_file --user=mkrafcz2 --protocol=anyconnect vpn.illinois.edu 
+    #$NS_EXEC openconnect -b --interface $vpn_interface --user=mkrafcz2 --protocol=anyconnect vpn.illinois.edu
+
+    # Wait for $vpn_inteface interface to be created
+    while ! $NS_EXEC ip link show dev $vpn_interface >/dev/null 2>&1; do sleep .5; done;
+]
+
+    # Enable IP forwarding and NAT
+    echo "Creating iptables rules"
+    sudo iptables -A FORWARD -o $OUT_IF -i $vpn_interface -j ACCEPT
+    sudo iptables -t nat -A POSTROUTING -o $vpn_interface -j MASQUERADE
+
+    ## Set up port forwarding
+    #if [[ -n "$PORT" && "$PORT" -ge 1 && "$PORT" -le 65535 ]]; then
+    #    sudo iptables -t nat -A PREROUTING -p tcp --dport $PORT -j DNAT --to-destination 192.168.1.2:$PORT
+    #fi
+
 }
 
 teardown_vpn() {
     # If VPN_PID is not 0, kill it
-    if [ $VPN_PID -ne 0 ]; then
-        sudo kill -SIGINT $VPN_PID || true
-    fi
+    #VPN_PID=$(cat $vpn_pid_file)
+    #sudo kill -SIGINT $VPN_PID || true
+    echo "Stopping VPN and other processes within the network namespace $NS_NAME"
+    sudo ip netns pids $NS_NAME | sudo xargs -rd'\n' kill -SIGINT
 
-    # Remove port forwarding
-    if [[ -n "$PORT" && "$PORT" -ge 1 && "$PORT" -le 65535 ]]; then
-        sudo iptables -t nat -D PREROUTING -p tcp --dport $PORT -j DNAT --to-destination 192.168.1.2:$PORT || true
-    fi
+    sleep 2
+
+    ## Remove port forwarding
+    #if [[ -n "$PORT" && "$PORT" -ge 1 && "$PORT" -le 65535 ]]; then
+    #    sudo iptables -t nat -D PREROUTING -p tcp --dport $PORT -j DNAT --to-destination 192.168.1.2:#$PORT || true
+    #fi
 
     # Remove port forwarding and NAT
-    sudo iptables -t nat -D POSTROUTING -o tun0 -j MASQUERADE || true
-    sudo iptables -D FORWARD -o $veth0 -i tun0 -j ACCEPT || true
+    echo "Removing iptables rules"
+    sudo iptables -t nat -D POSTROUTING -o $vpn_interface -j MASQUERADE || true
+    sudo iptables -D FORWARD -o $OUT_IF -i $vpn_interface -j ACCEPT || true
 
     # Disable IP forwarding
     if [ "$IP_FORWARD_ORIG" -eq 0 ]; then
+        echo "Disabling IP Forwarding"
         echo 0 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
     fi
 
     # Delete network namespace and veth pair
-    sudo ip netns del $NAMESPACE || true
-    sudo ip link del $veth0 || true
+    echo "Deleting network namespace $NS_NAME"
+    sudo ip netns del $NS_NAME || true
+    echo "Deleting remaining network interface $OUT_IF"
+    sudo ip link del $OUT_IF || true
 }
 
 # Trap keyboard interrupt (Ctrl+C)
@@ -71,6 +122,7 @@ trap teardown_vpn EXIT SIGINT SIGTERM
 setup_vpn
 
 # Wait for the VPN process to finish
+VPN_PID=$(cat $vpn_pid_file)
 if [ $VPN_PID -ne 0 ]; then
     wait $VPN_PID
 fi
