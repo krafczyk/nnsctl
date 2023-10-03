@@ -31,7 +31,7 @@ setup_vpn() {
         sudo iptables -t nat -A PREROUTING -p tcp --dport $PORT -j DNAT --to-destination 192.168.1.2:$PORT
     fi
 
-    if [ "$IP_FOWARD_ORIG" -eq 0 ]; then
+    if [ "$IP_FORWARD_ORIG" -eq 0 ]; then
         echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
     fi
 
