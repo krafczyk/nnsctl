@@ -128,7 +128,7 @@ teardown_vpn() {
 
     sudo iptables -D FORWARD -i $WIRED_IF -o $OUT_IF -j ACCEPT || true
     sudo iptables -D FORWARD -o $WIRED_IF -i $OUT_IF -j ACCEPT || true
-    sudo iptables -t nat -D POSTROUTING -o $WIRED_IF -j MASQUERADE || true
+    sudo iptables -t nat -D POSTROUTING -s $OUT_IP/24 -o $WIRED_IF -j MASQUERADE || true
 
     # Disable IP forwarding
     if [ "$IP_FORWARD_ORIG" -eq 0 ]; then

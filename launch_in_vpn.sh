@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Default namespace
-NAMESPACE="myvpn"
+NS_NAME="myvpn"
 
 # Check for namespace argument
 if [ "$1" == "--namespace" ]; then
   shift
-  NAMESPACE=$1
+  NS_NAME=$1
   shift
 fi
 
@@ -14,4 +14,4 @@ fi
 USERNAME=$(whoami)
 
 # Run the command in the network namespace as the current user
-sudo ip netns exec $NAMESPACE runuser -u $USERNAME -- "$@"
+sudo -E ip netns exec $NS_NAME runuser -u $USERNAME -- "$@"
