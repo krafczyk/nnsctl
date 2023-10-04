@@ -74,7 +74,7 @@ setup_vpn() {
     # Run OpenConnect in the namespace
     echo "Starting VPN..."
     ##$NS_EXEC openconnect -b --interface $vpn_interface --pid-file=$vpn_pid_file --user=${VPN_USER} --protocol=anyconnect $VPN_ENDPOINT
-    $NS_EXEC openconnect -b --interface $vpn_interface --user=${VPN_USER} --protocol=anyconnect $VPN_ENDPOINT
+    $NS_EXEC openconnect -b --interface $vpn_interface --user=${VPN_USER} --authgroup=3_TunnelAll --protocol=anyconnect $VPN_ENDPOINT
 
     # Wait for $vpn_inteface interface to be created
     while ! $NS_EXEC ip link show dev $vpn_interface >/dev/null 2>&1; do sleep .5; done;
