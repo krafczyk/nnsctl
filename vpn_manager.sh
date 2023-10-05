@@ -1,10 +1,50 @@
 #!/bin/bash
 
-# Namespace name and ifaces
-NS_NAME="nn_vpn"
-OUT_IF="${NS_NAME}0"
-IN_IF="${NS_NAME}1"
-NS_EXEC="sudo -E ip netns exec $NS_NAME"
+set -e
+
+# Find and load default values from config file
+CONFIG_FILE="$(dirname "$0")/vpn_config.sh"
+if [ -f "$CONFIG_FILE" ]; then
+  source "$CONFIG_FILE"
+else
+  echo "Config file vpn_config.sh not found. Using built-in defaults."
+fi
+
+# Usage function for help text
+usage() {
+  echo "Usage: $0 [options]"
+  echo "Options:"
+  echo "  -u, --user          VPN User"
+  echo "  -a, --authgroup     VPN Authgroup"
+  echo "  -n, --ns-name       Namespace Name"
+  echo "  -v, --vpn-if        VPN Interface"
+  echo "  -e, --vpn-endpoint  VPN Endpoint"
+  echo "  -h, --host-if       Host Interface"
+  echo "  -i, --host-ip       Host IP"
+  echo "  -s, --subnet        Subnet to use"
+  echo "  --help              Display this help text and exit"
+}
+
+# Parse command line arguments
+TEMP=$(getopt -o u::a::n::v::e::h::i::s:: --long user::,authgroup::,ns-name::,vpn-if::,vpn-endpoint::,host-if::,host-ip::,subnet::,help -n "$0" -- "$@")
+
+eval set -- "$TEMP"
+
+while true; do
+    case "$1" in
+        -u|--user) USER="$2"; shift 2;;
+        -a|--authgroup) AUTHGROUP="$2"; shift 2;;
+        -n|--ns-name) NS_NAME="$2"; shift 2;;
+        -v|--vpn-if) VPN_IF="$2"; shift 2;;
+        -e|--vpn-endpoint) VPN_ENDPOINT="$2"; shift 2;;
+        -h|--host-if) HOST_IF="$2"; shift 2;;
+        -i|--host-ip) HOST_IP="$2"; shift 2;;
+        -s|--subnet) SUBNET="$2"; shift 2;;
+        --help) usage; exit 0;;
+        --) shift; break;;
+        *) echo "Invalid option"; usage; exit 1;;
+    esac
+done
 
 get_active_ip_iface() {
     ip_data=$(ip -4 addr show scope global | grep -Eo 'inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}')
@@ -23,12 +63,12 @@ get_active_ip_iface() {
 read -r HOST_IF HOST_IP <<< "$(get_active_ip_iface)"
 echo "Using interface: $HOST_IF, IP: $HOST_IP"
 
-VPN_USER="mkrafcz2"
-NAMESPACE_SUBNET=192.168.3
-OUT_IP=$NAMESPACE_SUBNET.1
-IN_IP=$NAMESPACE_SUBNET.2
-VPN_IF="vpn0"
-VPN_ENDPOINT="vpn.illinois.edu"
+OUT_IP="${SUBNET}.1"
+OUT_IF="${NS_NAME}0"
+IN_IP="${SUBNET}.2"
+IN_IF="${NS_NAME}1"
+
+NS_EXEC="sudo -E ip netns exec $NS_NAME"
 
 # Save current state of IP forwarding
 IP_FORWARD_ORIG=$(cat /proc/sys/net/ipv4/ip_forward)
@@ -89,7 +129,7 @@ setup_vpn() {
 
     # Run OpenConnect in the namespace
     echo "Starting VPN..."
-    $NS_EXEC openconnect -b --interface $VPN_IF --user=${VPN_USER} --authgroup=3_TunnelAll --protocol=anyconnect $VPN_ENDPOINT
+    $NS_EXEC openconnect -b --interface $VPN_IF --user=${USER} --authgroup=$AUTHGROUP --protocol=anyconnect $VPN_ENDPOINT
 
     # Wait for $vpn_inteface interface to be created
     while [ "$terminate" -ne 1 ] && ! $NS_EXEC ip link show dev $VPN_IF >/dev/null 2>&1; do
@@ -112,6 +152,7 @@ delete_rule() {
 }
 
 teardown_vpn() {
+    set +e
     terminate=1
 
     echo "Stopping VPN and other processes within the network namespace $NS_NAME"
