@@ -1,17 +1,33 @@
 #!/bin/bash
 
-NS_NAME="myvpn"
-NS_EXEC="sudo -E ip netns exec $NS_NAME"
-VPN_USER="mkrafcz2"
-WIRED_IF="enp5s0" # We may need to add additional interfaces.
+# Namespace name and ifaces
+NS_NAME="nn_vpn"
 OUT_IF="${NS_NAME}0"
 IN_IF="${NS_NAME}1"
-#OUT_IP=192.168.1.1
-#IN_IP=192.168.1.2
-OUT_IP=192.168.3.1
-IN_IP=192.168.3.2
-vpn_pid_file="vpn.pid"
-vpn_interface="vpn0"
+NS_EXEC="sudo -E ip netns exec $NS_NAME"
+
+get_active_ip_iface() {
+    ip_data=$(ip -4 addr show scope global | grep -Eo 'inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}')
+    for ip in $ip_data; do
+        iface=$(ip -4 addr | grep $ip | awk '{print $NF}')
+        status=$(cat /sys/class/net/$iface/operstate)
+        if [ "$status" == "up" ]; then
+            echo "$iface $ip"
+            return 0
+        fi
+    done
+    echo "No active non-loopback interfaces found."
+    exit 1
+}
+
+read -r HOST_IP HOST_IF <<< "$(get_active_ip_iface)"
+echo "Using interface: $HOST_IF, IP: $HOST_IP"
+
+VPN_USER="mkrafcz2"
+NAMESPACE_SUBNET=192.168.3
+OUT_IP=$NAMESPACE_SUBNET.1
+IN_IP=$NAMESPACE_SUBNET.2
+VPN_IF="vpn0"
 VPN_ENDPOINT="vpn.illinois.edu"
 
 # Save current state of IP forwarding
@@ -26,11 +42,7 @@ if sudo ip netns list | grep -q $NS_NAME; then
     exit 1
 fi
 
-# Check whether the pid file is available
-if [ -e "$vpn_pid_file" ]; then
-    echo "VPN process already running"
-    exit 1
-fi
+terminate=0
 
 setup_vpn() {
     # Create network namespace
@@ -67,27 +79,29 @@ setup_vpn() {
 
     # Fix direct traffic destined for host ip to host lo
     echo "Setting iptables rules"
-    sudo iptables -t nat -A PREROUTING -i $OUT_IF -d 192.168.2.31 -j DNAT --to-destination 127.0.0.1
-    sudo iptables -t nat -A POSTROUTING -o $OUT_IF -s 127.0.0.1 -j SNAT --to-source 192.168.2.31
+    sudo iptables -t nat -A PREROUTING -i $OUT_IF -d $HOST_IP -j DNAT --to-destination 127.0.0.1
+    sudo iptables -t nat -A POSTROUTING -o $OUT_IF -s 127.0.0.1 -j SNAT --to-source $HOST_IP
     # Direct traffic out of the namespace to the internet
-    sudo iptables -t nat -A POSTROUTING -s $OUT_IP/24 -o $WIRED_IF -j MASQUERADE
+    sudo iptables -t nat -A POSTROUTING -s $OUT_IP/24 -o $HOST_IF -j MASQUERADE
     # Traffic from the internet to the namespace
-    sudo iptables -A FORWARD -o $WIRED_IF -i $OUT_IF -j ACCEPT
-    sudo iptables -A FORWARD -i $WIRED_IF -o $OUT_IF -j ACCEPT
+    sudo iptables -A FORWARD -o $HOST_IF -i $OUT_IF -j ACCEPT
+    sudo iptables -A FORWARD -i $HOST_IF -o $OUT_IF -j ACCEPT
 
     # Run OpenConnect in the namespace
     echo "Starting VPN..."
-    $NS_EXEC openconnect -b --interface $vpn_interface --user=${VPN_USER} --authgroup=3_TunnelAll --protocol=anyconnect $VPN_ENDPOINT
+    $NS_EXEC openconnect -b --interface $VPN_IF --user=${VPN_USER} --authgroup=3_TunnelAll --protocol=anyconnect $VPN_ENDPOINT
 
     # Wait for $vpn_inteface interface to be created
-    while ! $NS_EXEC ip link show dev $vpn_interface >/dev/null 2>&1; do sleep .5; done;
+    while [ "$terminate" -ne 1 ] && ! $NS_EXEC ip link show dev $VPN_IF >/dev/null 2>&1; do
+        sleep .5;
+    done;
 
     # Ensure lo local routing is enabled
     echo "Enabling lo local routing"
     echo 1 | sudo tee /proc/sys/net/ipv4/conf/lo/route_localnet > /dev/null
 
     # Set local routing for $OUT_IF
-    echo 1 | sudo tee /proc/sys/net/ipv4/conf/$OUT_IF/route_localnet > /dev/null
+    echo 1 | sudo tee /proc/sys/net/ipv4/conf/$OUT_IF/route_localnet &> /dev/null
 }
 
 delete_rule() {
@@ -98,6 +112,8 @@ delete_rule() {
 }
 
 teardown_vpn() {
+    terminate=1
+
     echo "Stopping VPN and other processes within the network namespace $NS_NAME"
     pids=$(sudo ip netns pids $NS_NAME)
     # First try to terminate
@@ -116,11 +132,11 @@ teardown_vpn() {
 
     # Remove iptables rules
     echo "Removing iptables rules"
-    delete_rule -t nat -D PREROUTING -i $OUT_IF -d 192.168.2.31 -j DNAT --to-destination 127.0.0.1 || true
-    delete_rule -t nat -D POSTROUTING -o $OUT_IF -s 127.0.0.1 -j SNAT --to-source 192.168.2.31 || true
-    delete_rule -D FORWARD -i $WIRED_IF -o $OUT_IF -j ACCEPT || true
-    delete_rule -D FORWARD -o $WIRED_IF -i $OUT_IF -j ACCEPT || true
-    delete_rule -t nat -D POSTROUTING -s $OUT_IP/24 -o $WIRED_IF -j MASQUERADE || true
+    delete_rule -t nat -D PREROUTING -i $OUT_IF -d $HOST_IP -j DNAT --to-destination 127.0.0.1 || true
+    delete_rule -t nat -D POSTROUTING -o $OUT_IF -s 127.0.0.1 -j SNAT --to-source $HOST_IP || true
+    delete_rule -D FORWARD -i $HOST_IF -o $OUT_IF -j ACCEPT || true
+    delete_rule -D FORWARD -o $HOST_IF -i $OUT_IF -j ACCEPT || true
+    delete_rule -t nat -D POSTROUTING -s $OUT_IP/24 -o $HOST_IF -j MASQUERADE || true
 
     # Disable IP forwarding
     if [ "$IP_FORWARD_ORIG" -eq 0 ]; then
@@ -153,4 +169,12 @@ trap teardown_vpn EXIT SIGINT SIGTERM
 setup_vpn
 
 # Wait for processes in the network namespace to finish
-while sudo ip netns pids $NS_NAME | grep -q .; do sleep .5; done;
+while [ "$terminate" -ne 1 ]; do
+    PIDS=$(sudo ip netns pids $NS_NAME 2> /dev/null)
+    echo "PIDS: ${PIDS}"
+    if [[ $? -ne 0 || -z "$PIDS" ]]; then
+        echo "Breaking loop"
+        break
+    fi
+    sleep .5
+done
