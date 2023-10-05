@@ -40,17 +40,19 @@ setup_vpn() {
     # Create network interface pair and move $IN_IF to namespace
     echo "Creating network interface pair"
     sudo ip link add $OUT_IF type veth peer name $IN_IF
-    sudo ip link set $OUT_IF up
     sudo ip link set $IN_IF netns $NS_NAME
 
     # Configure IP addresses and bring up interfaces
     echo "Configuring IP addresses and routing"
+    # Configure IP addresses for veth pair
     sudo ip addr add $OUT_IP/24 dev $OUT_IF
     $NS_EXEC ip addr add $IN_IP/24 dev $IN_IF
+    # Bring up new interfaces
+    sudo ip link set $OUT_IF up
     $NS_EXEC ip link set $IN_IF up
-    $NS_EXEC ip route add default via $OUT_IP dev $IN_IF
     $NS_EXEC ip link set lo up
-    #$NS_EXEC ip route add 127.0.0.0/8 via $OUT_IP dev $IN_IF
+    # Create routes for namespace
+    $NS_EXEC ip route add default via $OUT_IP dev $IN_IF
     $NS_EXEC ip route add 192.168.2.0/24 via $OUT_IP dev $IN_IF
 
     # Ensure IP forwarding is enabled
@@ -63,49 +65,18 @@ setup_vpn() {
     sudo mkdir -p /etc/netns/${NS_NAME}
     sudo cp /etc/resolv.conf /etc/netns/${NS_NAME}
 
-    #sudo iptables -t nat -A PREROUTING -i $OUT_IF -d 127.0.0.0/8 -j REDIRECT
+    # Fix direct traffic destined for host ip to host lo
+    echo "Setting iptables rules"
     sudo iptables -t nat -A PREROUTING -i $OUT_IF -d 192.168.2.31 -j DNAT --to-destination 127.0.0.1
     sudo iptables -t nat -A POSTROUTING -o $OUT_IF -s 127.0.0.1 -j SNAT --to-source 192.168.2.31
+    # Direct traffic out of the namespace to the internet
     sudo iptables -t nat -A POSTROUTING -s $OUT_IP/24 -o $WIRED_IF -j MASQUERADE
+    # Traffic from the internet to the namespace
     sudo iptables -A FORWARD -o $WIRED_IF -i $OUT_IF -j ACCEPT
     sudo iptables -A FORWARD -i $WIRED_IF -o $OUT_IF -j ACCEPT
 
-    echo "Pre vpn MAIN namespace"
-    #echo "Pre vpn addrs"
-    #sudo ip addr show
-    echo "Pre vpn routes"
-    sudo ip route show
-    #echo "Pre vpn iptables"
-    #sudo iptables -L -n -v
-    echo "Pre vpn nat iptables"
-    sudo iptables -t nat -L -n -v
-    #echo "Pre vpn mangle iptables"
-    #sudo iptables -t mangle -L -n -v
-
-    echo "Pre vpn myvpn namespace"
-    #echo "Pre vpn addrs"
-    #$NS_EXEC ip addr show
-    echo "Pre vpn routes"
-    $NS_EXEC ip route show
-    #echo "Pre vpn iptables"
-    #$NS_EXEC iptables -L -n -v
-    echo "Pre vpn nat iptables"
-    $NS_EXEC iptables -t nat -L -n -v
-    #echo "Pre vpn mangle iptables"
-    #$NS_EXEC iptables -t mangle -L -n -v
-
-    echo "Pre vpn ping test"
-    #$NS_EXEC ping -c 3 127.0.0.1
-    #$NS_EXEC ping -c 3 localhost
-    #$NS_EXEC ping -c 3 8.8.8.8
-    $NS_EXEC ping -c 3 192.168.2.1
-    $NS_EXEC ping -c 3 192.168.2.31
-    #$NS_EXEC ping -c 3 ${VPN_ENDPOINT}
-    #$NS_EXEC ping -c 3 google.com
-
     # Run OpenConnect in the namespace
     echo "Starting VPN..."
-    ##$NS_EXEC openconnect -b --interface $vpn_interface --pid-file=$vpn_pid_file --user=${VPN_USER} --protocol=anyconnect $VPN_ENDPOINT
     $NS_EXEC openconnect -b --interface $vpn_interface --user=${VPN_USER} --authgroup=3_TunnelAll --protocol=anyconnect $VPN_ENDPOINT
 
     # Wait for $vpn_inteface interface to be created
@@ -117,54 +88,16 @@ setup_vpn() {
 
     # Set local routing for $OUT_IF
     echo 1 | sudo tee /proc/sys/net/ipv4/conf/$OUT_IF/route_localnet > /dev/null
+}
 
-    ## Add route to 192.168.2 back
-    #$NS_EXEC ip route add 192.168.2.0/24 via $OUT_IP dev $IN_IF
-
-    echo "Post vpn MAIN namespace"
-    #echo "Post vpn addrs"
-    #sudo ip addr show
-    echo "Post vpn routes"
-    sudo ip route show
-    #echo "Post vpn iptables"
-    #sudo iptables -L -n -v
-    echo "Post vpn nat iptables"
-    sudo iptables -t nat -L -n -v
-    #echo "Post vpn mangle iptables"
-    #sudo iptables -t mangle -L -n -v
-
-    echo "Post vpn myvpn namespace"
-    #echo "Post vpn addrs"
-    #$NS_EXEC ip addr show
-    echo "Post vpn routes"
-    $NS_EXEC ip route show
-    #echo "Post vpn iptables"
-    #$NS_EXEC iptables -L -n -v
-    echo "Post vpn nat iptables"
-    $NS_EXEC iptables -t nat -L -n -v
-    #echo "Post vpn mangle iptables"
-    #$NS_EXEC iptables -t mangle -L -n -v
-
-    echo "post vpn ping test"
-
-    #$NS_EXEC ping -c 3 127.0.0.1
-    #$NS_EXEC ping -c 3 localhost
-    #$NS_EXEC ping -c 3 8.8.8.8
-    $NS_EXEC ping -c 3 192.168.2.1
-    $NS_EXEC ping -c 3 192.168.2.31
-    #$NS_EXEC ping -c 3 ${VPN_ENDPOINT}
-    #$NS_EXEC ping -c 3 google.com
-
-    ## Enable IP forwarding and NAT
-    #echo "Creating iptables rules"
-    #sudo iptables -A FORWARD -o $OUT_IF -i $vpn_interface -j ACCEPT
-    #sudo iptables -t nat -A POSTROUTING -o $vpn_interface -j MASQUERADE
+delete_rule() {
+    sudo iptables -C $@ 2>/dev/null
+    if [ $? -eq 0 ]; then
+        sudo iptables -D $@
+    fi
 }
 
 teardown_vpn() {
-    ## If VPN_PID is not 0, kill it
-    ##VPN_PID=$(cat $vpn_pid_file)
-    ##sudo kill -SIGINT $VPN_PID || true
     echo "Stopping VPN and other processes within the network namespace $NS_NAME"
     pids=$(sudo ip netns pids $NS_NAME)
     # First try to terminate
@@ -181,17 +114,13 @@ teardown_vpn() {
         fi
     done 
 
-    ## Remove port forwarding and NAT
-    #echo "Removing iptables rules"
-    #sudo iptables -t nat -D POSTROUTING -o $vpn_interface -j MASQUERADE || true
-    #sudo iptables -D FORWARD -o $OUT_IF -i $vpn_interface -j ACCEPT || true
-
-    #sudo iptables -t nat -D PREROUTING -i $OUT_IF -d 127.0.0.0/8 -j REDIRECT || true
-    sudo iptables -t nat -D PREROUTING -i $OUT_IF -d 192.168.2.31 -j DNAT --to-destination 127.0.0.1 || true
-    sudo iptables -t nat -D POSTROUTING -o $OUT_IF -s 127.0.0.1 -j SNAT --to-source 192.168.2.31 || true
-    sudo iptables -D FORWARD -i $WIRED_IF -o $OUT_IF -j ACCEPT || true
-    sudo iptables -D FORWARD -o $WIRED_IF -i $OUT_IF -j ACCEPT || true
-    sudo iptables -t nat -D POSTROUTING -s $OUT_IP/24 -o $WIRED_IF -j MASQUERADE || true
+    # Remove iptables rules
+    echo "Removing iptables rules"
+    delete_rule -t nat -D PREROUTING -i $OUT_IF -d 192.168.2.31 -j DNAT --to-destination 127.0.0.1 || true
+    delete_rule -t nat -D POSTROUTING -o $OUT_IF -s 127.0.0.1 -j SNAT --to-source 192.168.2.31 || true
+    delete_rule -D FORWARD -i $WIRED_IF -o $OUT_IF -j ACCEPT || true
+    delete_rule -D FORWARD -o $WIRED_IF -i $OUT_IF -j ACCEPT || true
+    delete_rule -t nat -D POSTROUTING -s $OUT_IP/24 -o $WIRED_IF -j MASQUERADE || true
 
     # Disable IP forwarding
     if [ "$IP_FORWARD_ORIG" -eq 0 ]; then
@@ -206,13 +135,16 @@ teardown_vpn() {
     fi
 
     # Delete nameserver configuration
-    sudo rm -r /etc/netns/${NS_NAME}
+    echo "Deleting nameserver configuration"
+    if [ -e "/etc/netns/${NS_NAME}/resolv.conf" ]; then
+        sudo rm -r /etc/netns/${NS_NAME}/resolv.conf
+    fi
 
     # Delete network namespace and veth pair
-    echo "Deleting network namespace $NS_NAME"
-    sudo ip netns del $NS_NAME || true
-    echo "Deleting remaining network interface $OUT_IF"
-    sudo ip link del $OUT_IF || true
+    if sudo ip netns list | grep -q "$NS_NAME"; then
+        echo "Deleting network namespace $NS_NAME"
+        sudo ip netns del $NS_NAME || true
+    fi
 }
 
 # Trap keyboard interrupt (Ctrl+C)
