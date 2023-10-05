@@ -20,7 +20,7 @@ get_active_ip_iface() {
     exit 1
 }
 
-read -r HOST_IP HOST_IF <<< "$(get_active_ip_iface)"
+read -r HOST_IF HOST_IP <<< "$(get_active_ip_iface)"
 echo "Using interface: $HOST_IF, IP: $HOST_IP"
 
 VPN_USER="mkrafcz2"
@@ -171,9 +171,7 @@ setup_vpn
 # Wait for processes in the network namespace to finish
 while [ "$terminate" -ne 1 ]; do
     PIDS=$(sudo ip netns pids $NS_NAME 2> /dev/null)
-    echo "PIDS: ${PIDS}"
     if [[ $? -ne 0 || -z "$PIDS" ]]; then
-        echo "Breaking loop"
         break
     fi
     sleep .5
