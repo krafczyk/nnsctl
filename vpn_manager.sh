@@ -17,6 +17,9 @@ VPN_ENDPOINT="vpn.illinois.edu"
 # Save current state of IP forwarding
 IP_FORWARD_ORIG=$(cat /proc/sys/net/ipv4/ip_forward)
 
+# Save current state of lo local routing
+LO_LOCAL_ROUTING=$(cat /proc/sys/net/ipv4/conf/lo/route_localnet)
+
 # Validation on whether the namespace exists
 if sudo ip netns list | grep -q $NS_NAME; then
     echo "Namespace $NS_NAME already exists"
@@ -47,12 +50,12 @@ setup_vpn() {
     $NS_EXEC ip link set $IN_IF up
     $NS_EXEC ip route add default via $OUT_IP dev $IN_IF
     $NS_EXEC ip link set lo up
+    #$NS_EXEC ip route add 127.0.0.0/8 via $OUT_IP dev $IN_IF
+    $NS_EXEC ip route add 192.168.2.0/24 via $OUT_IP dev $IN_IF
 
     # Ensure IP forwarding is enabled
-    if [ "$IP_FORWARD_ORIG" -eq 0 ]; then
-        echo "Enabling IP Forwarding"
-        echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
-    fi
+    echo "Enabling IP Forwarding"
+    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
 
     # Configure the nameserver to use inside the namespace
     # TODO use VPN-provided DNS servers in order to prevent leaks
@@ -60,16 +63,45 @@ setup_vpn() {
     sudo mkdir -p /etc/netns/${NS_NAME}
     sudo cp /etc/resolv.conf /etc/netns/${NS_NAME}
 
+    #sudo iptables -t nat -A PREROUTING -i $OUT_IF -d 127.0.0.0/8 -j REDIRECT
+    sudo iptables -t nat -A PREROUTING -i $OUT_IF -d 192.168.2.31 -j DNAT --to-destination 127.0.0.1
+    sudo iptables -t nat -A POSTROUTING -o $OUT_IF -s 127.0.0.1 -j SNAT --to-source 192.168.2.31
     sudo iptables -t nat -A POSTROUTING -s $OUT_IP/24 -o $WIRED_IF -j MASQUERADE
     sudo iptables -A FORWARD -o $WIRED_IF -i $OUT_IF -j ACCEPT
     sudo iptables -A FORWARD -i $WIRED_IF -o $OUT_IF -j ACCEPT
 
-    $NS_EXEC ping -c 3 127.0.0.1
-    $NS_EXEC ping -c 3 localhost
-    $NS_EXEC ping -c 3 8.8.8.8
+    echo "Pre vpn MAIN namespace"
+    #echo "Pre vpn addrs"
+    #sudo ip addr show
+    echo "Pre vpn routes"
+    sudo ip route show
+    #echo "Pre vpn iptables"
+    #sudo iptables -L -n -v
+    echo "Pre vpn nat iptables"
+    sudo iptables -t nat -L -n -v
+    #echo "Pre vpn mangle iptables"
+    #sudo iptables -t mangle -L -n -v
+
+    echo "Pre vpn myvpn namespace"
+    #echo "Pre vpn addrs"
+    #$NS_EXEC ip addr show
+    echo "Pre vpn routes"
+    $NS_EXEC ip route show
+    #echo "Pre vpn iptables"
+    #$NS_EXEC iptables -L -n -v
+    echo "Pre vpn nat iptables"
+    $NS_EXEC iptables -t nat -L -n -v
+    #echo "Pre vpn mangle iptables"
+    #$NS_EXEC iptables -t mangle -L -n -v
+
+    echo "Pre vpn ping test"
+    #$NS_EXEC ping -c 3 127.0.0.1
+    #$NS_EXEC ping -c 3 localhost
+    #$NS_EXEC ping -c 3 8.8.8.8
     $NS_EXEC ping -c 3 192.168.2.1
-    $NS_EXEC ping -c 3 ${VPN_ENDPOINT}
-    $NS_EXEC ping -c 3 google.com
+    $NS_EXEC ping -c 3 192.168.2.31
+    #$NS_EXEC ping -c 3 ${VPN_ENDPOINT}
+    #$NS_EXEC ping -c 3 google.com
 
     # Run OpenConnect in the namespace
     echo "Starting VPN..."
@@ -79,21 +111,49 @@ setup_vpn() {
     # Wait for $vpn_inteface interface to be created
     while ! $NS_EXEC ip link show dev $vpn_interface >/dev/null 2>&1; do sleep .5; done;
 
-    echo "post vpn tests"
+    # Ensure lo local routing is enabled
+    echo "Enabling lo local routing"
+    echo 1 | sudo tee /proc/sys/net/ipv4/conf/lo/route_localnet > /dev/null
 
-    $NS_EXEC ping -c 3 127.0.0.1
-    $NS_EXEC ping -c 3 localhost
-    $NS_EXEC ping -c 3 8.8.8.8
+    # Set local routing for $OUT_IF
+    echo 1 | sudo tee /proc/sys/net/ipv4/conf/$OUT_IF/route_localnet > /dev/null
+
+    ## Add route to 192.168.2 back
+    #$NS_EXEC ip route add 192.168.2.0/24 via $OUT_IP dev $IN_IF
+
+    echo "Post vpn MAIN namespace"
+    #echo "Post vpn addrs"
+    #sudo ip addr show
+    echo "Post vpn routes"
+    sudo ip route show
+    #echo "Post vpn iptables"
+    #sudo iptables -L -n -v
+    echo "Post vpn nat iptables"
+    sudo iptables -t nat -L -n -v
+    #echo "Post vpn mangle iptables"
+    #sudo iptables -t mangle -L -n -v
+
+    echo "Post vpn myvpn namespace"
+    #echo "Post vpn addrs"
+    #$NS_EXEC ip addr show
+    echo "Post vpn routes"
+    $NS_EXEC ip route show
+    #echo "Post vpn iptables"
+    #$NS_EXEC iptables -L -n -v
+    echo "Post vpn nat iptables"
+    $NS_EXEC iptables -t nat -L -n -v
+    #echo "Post vpn mangle iptables"
+    #$NS_EXEC iptables -t mangle -L -n -v
+
+    echo "post vpn ping test"
+
+    #$NS_EXEC ping -c 3 127.0.0.1
+    #$NS_EXEC ping -c 3 localhost
+    #$NS_EXEC ping -c 3 8.8.8.8
     $NS_EXEC ping -c 3 192.168.2.1
-    $NS_EXEC ping -c 3 ${VPN_ENDPOINT}
-    $NS_EXEC ping -c 3 google.com
-
-    echo "ip route show"
-    ip route show
-    echo "ip addr show"
-    ip addr show
-    echo "sudo ip netns pids"
-    sudo ip netns pids $NS_NAME
+    $NS_EXEC ping -c 3 192.168.2.31
+    #$NS_EXEC ping -c 3 ${VPN_ENDPOINT}
+    #$NS_EXEC ping -c 3 google.com
 
     ## Enable IP forwarding and NAT
     #echo "Creating iptables rules"
@@ -126,6 +186,9 @@ teardown_vpn() {
     #sudo iptables -t nat -D POSTROUTING -o $vpn_interface -j MASQUERADE || true
     #sudo iptables -D FORWARD -o $OUT_IF -i $vpn_interface -j ACCEPT || true
 
+    #sudo iptables -t nat -D PREROUTING -i $OUT_IF -d 127.0.0.0/8 -j REDIRECT || true
+    sudo iptables -t nat -D PREROUTING -i $OUT_IF -d 192.168.2.31 -j DNAT --to-destination 127.0.0.1 || true
+    sudo iptables -t nat -D POSTROUTING -o $OUT_IF -s 127.0.0.1 -j SNAT --to-source 192.168.2.31 || true
     sudo iptables -D FORWARD -i $WIRED_IF -o $OUT_IF -j ACCEPT || true
     sudo iptables -D FORWARD -o $WIRED_IF -i $OUT_IF -j ACCEPT || true
     sudo iptables -t nat -D POSTROUTING -s $OUT_IP/24 -o $WIRED_IF -j MASQUERADE || true
@@ -134,6 +197,12 @@ teardown_vpn() {
     if [ "$IP_FORWARD_ORIG" -eq 0 ]; then
         echo "Disabling IP Forwarding"
         echo 0 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
+    fi
+
+    # Disable lo local routing if necessary
+    if [ "$LO_LOCAL_ROUTING" -eq 0 ]; then
+        echo "Disabling lo local routing"
+        echo 0 | sudo tee /proc/sys/net/ipv4/conf/lo/route_localnet > /dev/null
     fi
 
     # Delete nameserver configuration
