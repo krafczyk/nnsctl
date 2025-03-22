@@ -90,8 +90,9 @@ setup_vpn() {
     sudo ip netns add $NS_NAME
 
     # Create network interface pair and move $IN_IF to namespace
-    echo "Creating network interface pair"
+    echo "Creating network interface pair $OUT_IF/$IN_IF"
     sudo ip link add $OUT_IF type veth peer name $IN_IF
+    echo "Moving $IN_IF to $NS_NAME"
     sudo ip link set $IN_IF netns $NS_NAME
 
     # Configure IP addresses and bring up interfaces
