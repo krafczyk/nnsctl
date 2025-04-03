@@ -302,15 +302,32 @@ def destroy_namespace(args):
 def status_namespace(args):
     ns_name = args.ns_name
     existing = run_cmd(["ip", "netns", "list"], capture_output=True)
+
+    if ns_name is None:
+        print("Host Status:")
+        print("IP Addresses")
+        run_cmd("ip addr show")
+        print("Routes")
+        run_cmd("ip route show")
+        print("IPTables")
+        run_cmd("sudo iptables -S")
+        print("IPTables NAT")
+        run_cmd("sudo iptables -t nat -S")
+        sys.exit(0)
+
     if ns_name not in existing:
         print(f"Namespace {ns_name} does not exist.")
         sys.exit(1)
 
-    print(f"Status for namespace {ns_name}:")
-    print("Interfaces:")
-    subprocess.run(["sudo", "ip", "netns", "exec", ns_name, "ip", "link", "show"])
-    print("\nRouting table:")
-    subprocess.run(["sudo", "ip", "netns", "exec", ns_name, "ip", "route", "show"])
+    print(f"Namespace {ns_name}:")
+    print("IP Addresses")
+    run_cmd("ip addr show")
+    print("Routes")
+    run_cmd("ip route show")
+    print("IPTables")
+    run_cmd("sudo iptables -S")
+    print("IPTables NAT")
+    run_cmd("sudo iptables -t nat -S")
 
     config_file = f"/tmp/nnsctl/{ns_name}/configuration.conf"
     namespace_config = load_namespace_config(ns_name)
@@ -399,7 +416,7 @@ def main():
 
     # status command
     parser_status = subparsers.add_parser("status", help="Get status of a network namespace")
-    parser_status.add_argument("ns_name", help="Name of the network namespace")
+    parser_status.add_argument("ns_name", nargs="?", help="Name of the network namespace")
     parser_status.set_defaults(func=status_namespace)
 
     # exec command
