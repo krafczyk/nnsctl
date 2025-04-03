@@ -49,10 +49,10 @@ def get_active_ip_iface():
         sys.exit(1)
 
 
-def load_namespace_config(config_file):
+def load_namespace_config(ns_name):
+    config_file = f"/tmp/nnsctl/{ns_name}/configuration.conf"
     if not os.path.exists(config_file):
-        print(f"Configuration file {config_file} not found.")
-        sys.exit(1)
+        return None
     with open(config_file) as f:
         return json.load(f)
 
@@ -277,7 +277,8 @@ def destroy_namespace(args):
     config_dir = f"/tmp/nnsctl/{ns_name}"
     if os.path.exists(config_dir):
         config_file = os.path.join(config_dir, "configuration.conf")
-        if os.path.exists(config_file):
+        namespace_config = load_namespace_config(ns_name)
+        if namespace_config is not None:
             namespace_config = load_namespace_config(config_file)
 
             # Attempt to remove iptables rules (errors are ignored)
@@ -326,22 +327,38 @@ def exec_in_namespace(args):
     full_cmd = ["sudo", "ip", "netns", "exec", ns_name] + args.command
     subprocess.run(full_cmd)
 
-def forward_port(args):
+def port_forward_add(args):
     ns_name = args.ns_name
     port = args.port
-    # For port forwarding we add DNAT and MASQUERADE rules.
-    active_iface, _ = get_active_ip_iface()
+    namespace_config = load_namespace_config(ns_name)
+    if namespace_config is None:
+        print("Namespace not managed by nnsctl.")
+        sys.exit(1)
+    host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
     print(f"Forwarding port {port} for namespace {ns_name}")
-    run_cmd(["sudo", "iptables", "-t", "nat", "-A", "PREROUTING", "-i", active_iface, "-p", "tcp",
-             "--dport", str(port), "-j", "DNAT", "--to-destination", f"127.0.0.1:{port}"])
-    run_cmd(["sudo", "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", active_iface, "-p", "tcp",
-             "--dport", str(port), "-j", "MASQUERADE"])
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -A OUTPUT -p tcp --dport {port} -d 127.0.0.1 -j DNAT --to-destination {host_veth_ip_addr}:{port}")
+    run_cmd(f"sudo iptables -t nat -A PREROUTING -p tcp -d {host_veth_ip_addr} --dport {port} -j DNAT --to-destination 127.0.0.1:{port}")
     print("Port forwarding rules added.")
+
+
+def port_forward_del(args):
+    ns_name = args.ns_name
+    port = args.port
+    namespace_config = load_namespace_config(ns_name)
+    if namespace_config is None:
+        print("Namespace not managed by nnsctl.")
+        sys.exit(1)
+    host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
+    print(f"Forwarding port {port} for namespace {ns_name}")
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D OUTPUT -p tcp --dport {port} -d 127.0.0.1 -j DNAT --to-destination {host_veth_ip_addr}:{port}", skip_error=True)
+    run_cmd(f"sudo iptables -t nat -D PREROUTING -p tcp -d {host_veth_ip_addr} --dport {port} -j DNAT --to-destination 127.0.0.1:{port}", skip_error=True)
+    print("Port forwarding rules removed.")
+
 
 def forward_x(args):
     # X forwarding uses port 6000 by default.
     args.port = 6000
-    forward_port(args)
+    port_forward(args)
 
 def list_namespaces(args):
     print("Listing network namespaces managed by nnsctl:")
@@ -393,18 +410,29 @@ def main():
     add_dry_run(parser_exec)
     parser_exec.set_defaults(func=exec_in_namespace)
 
-    # forward-port command
-    parser_forward_port = subparsers.add_parser("forward-port", help="Forward a port from host to namespace")
-    parser_forward_port.add_argument("ns_name", help="Name of the network namespace")
-    parser_forward_port.add_argument("port", type=int, help="Port number to forward")
-    add_dry_run(parser_forward_port)
-    parser_forward_port.set_defaults(func=forward_port)
+    # port-forward command
+    parser_port_forward = subparsers.add_parser("port-forward", help="Utilities for forwarding a port between host and namespace")
+    port_forward_subparsers = parser_port_forward.add_subparsers(dest="subcommand", required=True)
 
-    # forward-x command
-    parser_forward_x = subparsers.add_parser("forward-x", help="Forward X server port (6000) from host to namespace")
-    parser_forward_x.add_argument("ns_name", help="Name of the network namespace")
-    add_dry_run(parser_forward_x)
-    parser_forward_x.set_defaults(func=forward_x)
+    # port-forward add command
+    parser_port_forward_add = port_forward_subparsers.add_parser("add", help="Add port forwarding for a particular port")
+    parser_port_forward_add.add_argument("ns_name", help="Name of the network namespace")
+    parser_port_forward_add.add_argument("port", type=int, help="Port number to forward")
+    add_dry_run(parser_port_forward_add)
+    parser_port_forward_add.set_defaults(func=port_forward_add)
+
+    # port-forward del command
+    parser_port_forward_del = port_forward_subparsers.add_parser("del", help="Delete port forwarding for a particular port")
+    parser_port_forward_del.add_argument("ns_name", help="Name of the network namespace")
+    parser_port_forward_del.add_argument("port", type=int, help="Port number to forward")
+    add_dry_run(parser_port_forward_del)
+    parser_port_forward_del.set_defaults(func=port_forward_del)
+
+    ## forward-x command
+    #parser_forward_x = subparsers.add_parser("forward-x", help="Forward X server port (6000) from host to namespace")
+    #parser_forward_x.add_argument("ns_name", help="Name of the network namespace")
+    #add_dry_run(parser_forward_x)
+    #parser_forward_x.set_defaults(func=forward_x)
 
     args = parser.parse_args()
     args.func(args)
