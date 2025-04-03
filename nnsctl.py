@@ -164,7 +164,6 @@ def create_namespace(args):
         "host_ip": host_ip,
         "host_subnet": host_subnet,
         "ns_subnet": ns_subnet,
-        "forwarded_ports": []
     }
 
     # Save the configuration to file for later use
@@ -314,10 +313,10 @@ def status_namespace(args):
     subprocess.run(["sudo", "ip", "netns", "exec", ns_name, "ip", "route", "show"])
 
     config_file = f"/tmp/nnsctl/{ns_name}/configuration.conf"
-    if os.path.exists(config_file):
-        print("\nConfiguration:")
-        with open(config_file) as f:
-            print(f.read())
+    namespace_config = load_namespace_config(ns_name)
+    if namespace_config is not None:
+        pprint(namespace_config)
+
 
 def exec_in_namespace(args):
     ns_name = args.ns_name
