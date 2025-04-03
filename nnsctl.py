@@ -13,6 +13,8 @@ VERSION = "0.1.0"
 
 
 def run_cmd(cmd, capture_output=False, shell=False, dry_run=False, skip_error=False):
+    if type(cmd) is str and not shell:
+        cmd = cmd.split()
     """Run a system command and optionally return its output."""
     try:
         if not dry_run:
@@ -35,7 +37,7 @@ def get_active_ip_iface():
     Uses 'ip route get 8.8.8.8' to determine the primary interface.
     """
     try:
-        route_out = run_cmd(["ip", "route", "get", "8.8.8.8"], capture_output=True)
+        route_out = run_cmd("ip route get 8.8.8.8", capture_output=True)
         # Example output: "8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.100 ..."
         tokens = route_out.split()
         iface = tokens[tokens.index("dev") + 1]
@@ -95,7 +97,7 @@ def create_namespace(args):
     ns_veth_ip_addr = f"{ns_subnet_triplet}.2"
 
     # Check if namespace already exists
-    existing = run_cmd(["ip", "netns", "list"], capture_output=True)
+    existing = run_cmd("ip netns list", capture_output=True)
     if ns_name in existing:
         print(f"Namespace {ns_name} already exists.")
         sys.exit(1)
@@ -109,24 +111,24 @@ def create_namespace(args):
         print(f"Would create directory {config_dir}")
 
     print(f"Creating network namespace {ns_name}")
-    run_cmd(["sudo", "ip", "netns", "add", ns_name], dry_run=dry_run)
+    run_cmd(f"sudo ip netns add {ns_name}", dry_run=dry_run)
     print(f"Creating veth pair {host_veth} <-> {ns_veth}")
-    run_cmd(["sudo", "ip", "link", "add", host_veth, "type", "veth", "peer", "name", ns_veth], dry_run=dry_run)
+    run_cmd(f"sudo ip link add {host_veth} type veth peer name {ns_veth}", dry_run=dry_run)
     print(f"Moving {ns_veth} into namespace {ns_name}")
-    run_cmd(["sudo", "ip", "link", "set", ns_veth, "netns", ns_name], dry_run=dry_run)
+    run_cmd(f"sudo ip link set {ns_veth} netns {ns_name}", dry_run=dry_run)
 
     print("Configuring IP addresses and interfaces")
     # Assigning IP addresses
-    run_cmd(["sudo", "ip", "addr", "add", f"{host_veth_ip_addr}/24", "dev", host_veth], dry_run=dry_run)
-    run_cmd(["sudo", "ip", "netns", "exec", ns_name, "ip", "addr", "add", f"{ns_veth_ip_addr}/24", "dev", ns_veth], dry_run=dry_run)
+    run_cmd(f"sudo ip addr add {host_veth_ip_addr}/24 dev {host_veth}", dry_run=dry_run)
+    run_cmd(f"sudo ip netns exec {ns_name} ip addr add {ns_veth_ip_addr}/24 dev {ns_veth}", dry_run=dry_run)
 
     # Bring up the interfaces
-    run_cmd(["sudo", "ip", "link", "set", host_veth, "up"], dry_run=dry_run)
-    run_cmd(["sudo", "ip", "netns", "exec", ns_name, "ip", "link", "set", ns_veth, "up"], dry_run=dry_run)
-    run_cmd(["sudo", "ip", "netns", "exec", ns_name, "ip", "link", "set", "lo", "up"], dry_run=dry_run)
+    run_cmd(f"sudo ip link set {host_veth} up", dry_run=dry_run)
+    run_cmd(f"sudo ip netns exec {ns_name} ip link set {ns_veth} up", dry_run=dry_run)
+    run_cmd(f"sudo ip netns exec {ns_name} ip link set lo up", dry_run=dry_run)
 
     # Set default route within the namespace
-    run_cmd(["sudo", "ip", "netns", "exec", ns_name, "ip", "route", "add", "default", "via", host_veth_ip_addr], dry_run=dry_run)
+    run_cmd(f"sudo ip netns exec {ns_name} ip route add default via {host_veth_ip_addr}", dry_run=dry_run)
 
     print("Enabling IP forwarding")
     enable_ip_forwarding(dry_run=dry_run)
@@ -138,17 +140,19 @@ def create_namespace(args):
         _, detected_ip = get_active_ip_iface()
         host_ip = detected_ip
 
-    print("Setting iptables rules")
+    print("Setting iptables routing rules")
+    run_cmd(f"sudo iptables -I FORWARD -i {host_veth} -o {host_if} -j ACCEPT")
+    run_cmd(f"sudo iptables -I FORWARD -i {host_if} -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT")
     #run_cmd(["sudo", "iptables", "-t", "nat", "-A", "PREROUTING", "-i", host_veth, "-d", host_ip, "-j", "DNAT", "--to-destination", "127.0.0.1"], dry_run=dry_run)
     #run_cmd(["sudo", "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", host_veth, "-s", "127.0.0.1", "-j", "SNAT", "--to-source", host_ip], dry_run=dry_run)
-    run_cmd(["sudo", "iptables", "-t", "nat", "-A", "POSTROUTING", "-s", f"{ns_subnet}/24", "-o", host_if, "-j", "MASQUERADE"], dry_run=dry_run)
+    run_cmd(f"sudo iptables -t nat -A POSTROUTING -s {ns_subnet}/24 -o {host_if} -j MASQUERADE", dry_run=dry_run)
     #run_cmd(["sudo", "iptables", "-A", "FORWARD", "-o", host_if, "-i", host_veth, "-j", "ACCEPT"], dry_run=dry_run)
     #run_cmd(["sudo", "iptables", "-A", "FORWARD", "-i", host_if, "-o", host_veth, "-j", "ACCEPT"], dry_run=dry_run)
 
     print("Configuring DNS for the namespace")
     ns_resolv_dir = f"/etc/netns/{ns_name}"
-    run_cmd(["sudo", "mkdir", "-p", ns_resolv_dir], dry_run=dry_run)
-    run_cmd(["sudo", "cp", "/etc/resolv.conf", os.path.join(ns_resolv_dir, "resolv.conf")], dry_run=dry_run)
+    run_cmd(f"sudo mkdir -p {ns_resolv_dir}", dry_run=dry_run)
+    run_cmd(f"sudo cp /etc/resolv.conf {os.path.join(ns_resolv_dir, 'resolv.conf')}", dry_run=dry_run)
 
     config_data = {
         "ns_name": ns_name,
@@ -175,7 +179,7 @@ def create_namespace(args):
 
 def scrub_routes(subnet):
     print("Checking host routes...")
-    routes = run_cmd(["ip", "route", "show"], capture_output=True)
+    routes = run_cmd("ip route show", capture_output=True)
     subnet_triplet = '.'.join(subnet.split('.')[:3])
     print(f"scrub triplet: {subnet_triplet}")
     if not routes:
@@ -189,23 +193,34 @@ def scrub_routes(subnet):
             run_cmd(["sudo", "ip", "route", "del"] + line.split())
 
 
-def scrub_iptables_rules(subnet):
+def scrub_iptables_rules(subnet, iface):
     print("Checking iptables NAT rules...")
     subnet_triplet = '.'.join(subnet.split('.')[:3])
     print(f"scrub triplet: {subnet_triplet}")
     rules = run_cmd(["sudo", "iptables", "-t", "nat", "-S"], capture_output=True)
-    if not rules:
-        print("No iptables NAT rules found.")
-        return
-    for rule in rules.splitlines():
-        # Check if the rule contains our problematic subnet
-        if subnet_triplet in rule:
-            # We only want to delte rules that were added (lines starting with "-A")
-            if rule.startswith("-A"):
-                delete_rule = rule.replace("-A", "-D", 1)
-                cmd = ["sudo", "iptables", "-t", "nat"] + delete_rule.split()
-                print(f"Deleting iptables rule: {delete_rule}")
-                run_cmd(cmd)
+    if rules:
+        for rule in rules.splitlines():
+            # Check if the rule contains our problematic subnet
+            if subnet_triplet in rule:
+                # We only want to delte rules that were added (lines starting with "-A")
+                if rule.startswith("-A"):
+                    delete_rule = rule.replace("-A", "-D", 1)
+                    cmd = ["sudo", "iptables", "-t", "nat"] + delete_rule.split()
+                    print(f"Deleting iptables NAT rule: {delete_rule}")
+                    run_cmd(cmd)
+
+    print("Checking iptables routing rules...")
+    rules = run_cmd(["sudo", "iptables", "-S"], capture_output=True)
+    if rules:
+        for rule in rules.splitlines():
+            # Check if the rule contains our problematic subnet
+            if iface in rule:
+                # We only want to delte rules that were added (lines starting with "-A")
+                if rule.startswith("-A"):
+                    delete_rule = rule.replace("-A", "-D", 1)
+                    cmd = ["sudo", "iptables" ] + delete_rule.split()
+                    print(f"Deleting iptables routing rule: {delete_rule}")
+                    run_cmd(cmd)
 
 
 def is_ip_forwarding_enabled() -> bool:
@@ -267,8 +282,9 @@ def destroy_namespace(args):
 
             # Attempt to remove iptables rules (errors are ignored)
             ns_subnet = namespace_config["ns_subnet"]
+            host_veth = namespace_config["host_veth"]
             scrub_routes(ns_subnet)
-            scrub_iptables_rules(ns_subnet)
+            scrub_iptables_rules(ns_subnet, host_veth)
             print(f"Routes and NAT rules scrubbed")
         shutil.rmtree(config_dir, ignore_errors=True)
         print(f"Configuration directory {config_dir} removed.")
