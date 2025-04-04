@@ -229,6 +229,20 @@ def is_ip_forwarding_enabled() -> bool:
     return False
 
 
+def enable_route_localnet(iface, ns_name=None, dry_run=False):
+    if ns_name is None:
+        run_cmd(f"sudo sysctl -w net.ipv4.conf.{iface}.route_localnet=1", dry_run=dry_run)
+    else:
+        run_cmd(f"sudo ip netns exec {ns_name} sysctl -w net.ipv4.conf.{iface}.route_localnet=1", dry_run=dry_run)
+
+
+def disable_route_localnet(iface, ns_name=None, dry_run=False):
+    if ns_name is None:
+        run_cmd(f"sudo sysctl -w net.ipv4.conf.{iface}.route_localnet=0", dry_run=dry_run)
+    else:
+        run_cmd(f"sudo ip netns exec {ns_name} sysctl -w net.ipv4.conf.{iface}.route_localnet=0", dry_run=dry_run)
+
+
 def enable_ip_forwarding(dry_run=False):
     run_cmd(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"], dry_run=dry_run)
 
@@ -278,14 +292,15 @@ def destroy_namespace(args):
         config_file = os.path.join(config_dir, "configuration.conf")
         namespace_config = load_namespace_config(ns_name)
         if namespace_config is not None:
-            namespace_config = load_namespace_config(config_file)
-
             # Attempt to remove iptables rules (errors are ignored)
             ns_subnet = namespace_config["ns_subnet"]
             host_veth = namespace_config["host_veth"]
             scrub_routes(ns_subnet)
             scrub_iptables_rules(ns_subnet, host_veth)
             print(f"Routes and NAT rules scrubbed")
+            # Deleting host_veth iface
+            run_cmd("sudo ip link del " + host_veth, skip_error=True)
+            print(f"Host interface {host_veth} deleted.")
         shutil.rmtree(config_dir, ignore_errors=True)
         print(f"Configuration directory {config_dir} removed.")
 
@@ -297,6 +312,8 @@ def destroy_namespace(args):
             if is_ip_forwarding_enabled():
                 disable_ip_forwarding()
                 print("IP forwarding disabled as no other namespaces exist.")
+            # Turn off route_localnet for the host lo interface just in case
+            disable_route_localnet("lo")
 
 
 def status_namespace(args):
@@ -321,13 +338,13 @@ def status_namespace(args):
 
     print(f"Namespace {ns_name}:")
     print("IP Addresses")
-    run_cmd("ip addr show")
+    run_cmd(f"sudo ip netns exec {ns_name} ip addr show")
     print("Routes")
-    run_cmd("ip route show")
+    run_cmd(f"sudo ip netns exec {ns_name} ip route show")
     print("IPTables")
-    run_cmd("sudo iptables -S")
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -S")
     print("IPTables NAT")
-    run_cmd("sudo iptables -t nat -S")
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -S")
 
     config_file = f"/tmp/nnsctl/{ns_name}/configuration.conf"
     namespace_config = load_namespace_config(ns_name)
@@ -351,10 +368,13 @@ def port_forward_add(args):
         print("Namespace not managed by nnsctl.")
         sys.exit(1)
     host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
+    host_veth = namespace_config["host_veth"]
     print(f"Forwarding port {port} for namespace {ns_name}")
     run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -A OUTPUT -p tcp --dport {port} -d 127.0.0.1 -j DNAT --to-destination {host_veth_ip_addr}:{port}")
     run_cmd(f"sudo iptables -t nat -A PREROUTING -p tcp -d {host_veth_ip_addr} --dport {port} -j DNAT --to-destination 127.0.0.1:{port}")
     print("Port forwarding rules added.")
+    enable_route_localnet(host_veth)
+    print(f"Enabled route_localnet for host interface {host_veth}.")
 
 
 def port_forward_del(args):
@@ -365,16 +385,69 @@ def port_forward_del(args):
         print("Namespace not managed by nnsctl.")
         sys.exit(1)
     host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
-    print(f"Forwarding port {port} for namespace {ns_name}")
     run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D OUTPUT -p tcp --dport {port} -d 127.0.0.1 -j DNAT --to-destination {host_veth_ip_addr}:{port}", skip_error=True)
     run_cmd(f"sudo iptables -t nat -D PREROUTING -p tcp -d {host_veth_ip_addr} --dport {port} -j DNAT --to-destination 127.0.0.1:{port}", skip_error=True)
-    print("Port forwarding rules removed.")
+    print(f"Port forwarding rules for port {port} removed.")
+
+x_ports_1 = "6000:6100"
+x_ports_2 = "6000-6100"
+
+def x_forward_add(args):
+    ns_name = args.ns_name
+    namespace_config = load_namespace_config(ns_name)
+    if namespace_config is None:
+        print("Namespace not managed by nnsctl.")
+        sys.exit(1)
+    host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
+    ns_veth_ip_addr = namespace_config["ns_veth_ip_addr"]
+    host_veth = namespace_config["host_veth"]
+    ns_veth = namespace_config["ns_veth"]
+    print(f"Forwarding ports {x_ports_2} (Likely to be used by X server) for namespace {ns_name}")
+    # Version 1
+    #run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -A OUTPUT -p tcp --dport {x_ports_1} -d 127.0.0.1 -j DNAT --to-destination {host_veth_ip_addr}:{x_ports_2}")
+    #run_cmd(f"sudo iptables -t nat -A PREROUTING -p tcp -d {host_veth_ip_addr} --dport {x_ports_1} -j DNAT --to-destination 127.0.0.1:{x_ports_2}")
+    # Version 2
+    ## Rules inside the namespace (explanation from Gemini)
+    # Use the OUTPUT chain for locally generated packets
+    # Use DNAT to change the destination IP from localhost to the host's veth IP
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -A OUTPUT -p tcp -d 127.0.0.1 --dport {x_ports_1} -j DNAT --to-destination {host_veth_ip_addr}")
+    # Avoid martian source errors by changing the source IP to the namespace's veth IP
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -A POSTROUTING -o {ns_veth} -s 127.0.0.1 -d {host_veth_ip_addr} -p tcp --dport {x_ports_1} -j SNAT --to-source {ns_veth_ip_addr}")
+    ## Rules inside the host namespace
+    # Allow forwarding from the namespace veth to the loopback interface for X ports
+    #run_cmd(f"sudo iptables -A FORWARD -i {host_veth} -o lo -p tcp  -d 127.0.0.2 --dport {x_ports_1} -j ACCEPT")
+    run_cmd(f"sudo iptables -A FORWARD -i {host_veth} -o lo -p tcp  -d 127.0.0.1 --dport {x_ports_1} -j ACCEPT")
+    # Allow related/established connections back (essential for TCP)
+    # This rule is often present, but ensure it allows traffic back from loopback
+    run_cmd(f"sudo iptables -A FORWARD -i lo -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT")
+    # PREROUTING (DNAT): Change destination IP from veth-host IP to localhost
+    # Intercepts packets arriving on veth-host for itself on X ports
+    #run_cmd(f"sudo iptables -t nat -A PREROUTING -i {host_veth} -p tcp --dport {x_ports_1} -j DNAT --to-destination 127.0.0.2")
+    run_cmd(f"sudo iptables -t nat -A PREROUTING -i {host_veth} -p tcp --dport {x_ports_1} -j DNAT --to-destination 127.0.0.1")
+    # POSTROUTING (SNAT): Change source IP to localhost (for xauth)
+    # For packets going *to* the loopback interface for X ports, change their source IP
+    # This helps satisfy xauth checks expecting connections from localhost
+    #run_cmd(f"sudo iptables -t nat -A POSTROUTING -o lo -p tcp -d 127.0.0.2 --dport {x_ports_1} -s {ns_veth_ip_addr} -j SNAT --to-source 127.0.0.2")
+    run_cmd(f"sudo iptables -t nat -A POSTROUTING -o lo -p tcp -d 127.0.0.1 --dport {x_ports_1} -s {ns_veth_ip_addr} -j SNAT --to-source 127.0.0.1")
+    print("Port forwarding rules added.")
+    enable_route_localnet(host_veth)
+    enable_route_localnet("lo")
+    enable_route_localnet(ns_veth, ns_name=ns_name)
+    enable_route_localnet("lo", ns_name=ns_name)
+    print(f"Enabled route_localnet for host interface {host_veth}.")
 
 
-def forward_x(args):
-    # X forwarding uses port 6000 by default.
-    args.port = 6000
-    port_forward(args)
+def x_forward_del(args):
+    ns_name = args.ns_name
+    namespace_config = load_namespace_config(ns_name)
+    if namespace_config is None:
+        print("Namespace not managed by nnsctl.")
+        sys.exit(1)
+    host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D OUTPUT -p tcp --dport {x_ports_1} -d 127.0.0.1 -j DNAT --to-destination {host_veth_ip_addr}:{x_ports_2}")
+    run_cmd(f"sudo iptables -t nat -D PREROUTING -p tcp -d {host_veth_ip_addr} --dport {x_ports_1} -j DNAT --to-destination 127.0.0.1:{x_ports_2}")
+    print(f"Port forwarding rules for ports {x_ports_2} removed.")
+
 
 def list_namespaces(args):
     print("Listing network namespaces managed by nnsctl:")
@@ -444,11 +517,21 @@ def main():
     add_dry_run(parser_port_forward_del)
     parser_port_forward_del.set_defaults(func=port_forward_del)
 
-    ## forward-x command
-    #parser_forward_x = subparsers.add_parser("forward-x", help="Forward X server port (6000) from host to namespace")
-    #parser_forward_x.add_argument("ns_name", help="Name of the network namespace")
-    #add_dry_run(parser_forward_x)
-    #parser_forward_x.set_defaults(func=forward_x)
+    # x-forward command
+    parser_x_forward = subparsers.add_parser("x-forward", help="Forward X server ports (6000:6100) from host to namespace")
+    parser_x_forward_subparsers = parser_x_forward.add_subparsers(dest="subcommand", required=True)
+
+    # x-forward add command
+    parser_x_forward_add = parser_x_forward_subparsers.add_parser("add", help="Add X server port forwarding")
+    parser_x_forward_add.add_argument("ns_name", help="Name of the network namespace")
+    add_dry_run(parser_x_forward_add)
+    parser_x_forward_add.set_defaults(func=x_forward_add)
+
+    # x-forward del command
+    parser_x_forward_del = parser_x_forward_subparsers.add_parser("del", help="Delete X server port forwarding")
+    parser_x_forward_del.add_argument("ns_name", help="Name of the network namespace")
+    add_dry_run(parser_x_forward_del)
+    parser_x_forward_del.set_defaults(func=x_forward_del)
 
     args = parser.parse_args()
     args.func(args)
