@@ -350,13 +350,14 @@ def status_namespace(args):
     if namespace_config is not None:
         pprint(namespace_config)
 
-
 def exec_in_namespace(args):
+    import getpass
+    user = getpass.getuser()
     ns_name = args.ns_name
     if not args.command:
         print("No command specified for exec.")
         sys.exit(1)
-    full_cmd = ["sudo", "ip", "netns", "exec", ns_name] + args.command
+    full_cmd = ["sudo", "ip", "netns", "exec", ns_name, "sudo", "-u", user] + args.command
     subprocess.run(full_cmd)
 
 def port_forward_add(args):
