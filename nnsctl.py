@@ -395,12 +395,12 @@ def port_forward_del(args):
     ns_veth_ip_addr = namespace_config["ns_veth_ip_addr"]
     host_veth = namespace_config["host_veth"]
     ns_veth = namespace_config["ns_veth"]
-    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D OUTPUT -p tcp -d 127.0.0.1 --dport {port} -j DNAT --to-destination {host_veth_ip_addr}")
-    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D POSTROUTING -o {ns_veth} -s 127.0.0.1 -d {host_veth_ip_addr} -p tcp --dport {port} -j SNAT --to-source {ns_veth_ip_addr}")
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D OUTPUT -p tcp -d 127.0.0.1 --dport {port} -j DNAT --to-destination {host_veth_ip_addr}", skip_error=True)
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D POSTROUTING -o {ns_veth} -s 127.0.0.1 -d {host_veth_ip_addr} -p tcp --dport {port} -j SNAT --to-source {ns_veth_ip_addr}", skip_error=True)
     ## Rules inside the host namespace
-    run_cmd(f"sudo iptables -D FORWARD -i {host_veth} -o lo -p tcp  -d 127.0.0.1 --dport {port} -j ACCEPT")
-    run_cmd(f"sudo iptables -t nat -D PREROUTING -i {host_veth} -p tcp --dport {port} -j DNAT --to-destination 127.0.0.1")
-    run_cmd(f"sudo iptables -t nat -D POSTROUTING -o lo -p tcp -d 127.0.0.1 --dport {port} -s {ns_veth_ip_addr} -j SNAT --to-source 127.0.0.1")
+    run_cmd(f"sudo iptables -D FORWARD -i {host_veth} -o lo -p tcp  -d 127.0.0.1 --dport {port} -j ACCEPT", skip_error=True)
+    run_cmd(f"sudo iptables -t nat -D PREROUTING -i {host_veth} -p tcp --dport {port} -j DNAT --to-destination 127.0.0.1", skip_error=True)
+    run_cmd(f"sudo iptables -t nat -D POSTROUTING -o lo -p tcp -d 127.0.0.1 --dport {port} -s {ns_veth_ip_addr} -j SNAT --to-source 127.0.0.1", skip_error=True)
     print(f"Port forwarding rules for port {port} removed.")
 
 x_ports_1 = "6000:6100"
@@ -448,13 +448,16 @@ def x_forward_del(args):
         print("Namespace not managed by nnsctl.")
         sys.exit(1)
     host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
+    ns_veth_ip_addr = namespace_config["ns_veth_ip_addr"]
+    host_veth = namespace_config["host_veth"]
+    ns_veth = namespace_config["ns_veth"]
     # Remove the rules in the namespace
-    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D OUTPUT -p tcp -d 127.0.0.1 --dport {x_ports_1} -j DNAT --to-destination {host_veth_ip_addr}")
-    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D POSTROUTING -o {ns_veth} -s 127.0.0.1 -d {host_veth_ip_addr} -p tcp --dport {x_ports_1} -j SNAT --to-source {ns_veth_ip_addr}")
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D OUTPUT -p tcp -d 127.0.0.1 --dport {x_ports_1} -j DNAT --to-destination {host_veth_ip_addr}", skip_error=True)
+    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -D POSTROUTING -o {ns_veth} -s 127.0.0.1 -d {host_veth_ip_addr} -p tcp --dport {x_ports_1} -j SNAT --to-source {ns_veth_ip_addr}", skip_error=True)
     # Remove the rules in the host namespace
-    run_cmd(f"sudo iptables -D FORWARD -i {host_veth} -o lo -p tcp  -d 127.0.0.1 --dport {x_ports_1} -j ACCEPT")
-    run_cmd(f"sudo iptables -t nat -D PREROUTING -i {host_veth} -p tcp --dport {x_ports_1} -j DNAT --to-destination 127.0.0.1")
-    run_cmd(f"sudo iptables -t nat -D POSTROUTING -o lo -p tcp -d 127.0.0.1 --dport {x_ports_1} -s {ns_veth_ip_addr} -j SNAT --to-source 127.0.0.1")
+    run_cmd(f"sudo iptables -D FORWARD -i {host_veth} -o lo -p tcp  -d 127.0.0.1 --dport {x_ports_1} -j ACCEPT", skip_error=True)
+    run_cmd(f"sudo iptables -t nat -D PREROUTING -i {host_veth} -p tcp --dport {x_ports_1} -j DNAT --to-destination 127.0.0.1", skip_error=True)
+    run_cmd(f"sudo iptables -t nat -D POSTROUTING -o lo -p tcp -d 127.0.0.1 --dport {x_ports_1} -s {ns_veth_ip_addr} -j SNAT --to-source 127.0.0.1", skip_error=True)
 
     print(f"Port forwarding rules for ports {x_ports_2} removed.")
 
