@@ -6,38 +6,62 @@ import sys
 import time
 import json
 import shutil
+import psutil
+import time
 from pprint import pprint
+from pydantic import BaseModel
 
 
 VERSION = "0.1.0"
 
 
-def run_cmd(cmd, capture_output=False, shell=False, dry_run=False, skip_error=False):
+ns_config_base_path = "/tmp/nsctl"
+
+
+class Namespaces(BaseModel):
+    net: bool
+    mount: bool
+    pid: bool
+    ipc: bool
+    uts: bool
+    user: bool
+    cgroup: bool
+    time: bool
+
+
+class NSInfo(BaseModel):
+    name: str
+    pid: int
+    sudo: bool
+    namespaces: Namespaces
+
+
+def run_cmd(cmd: list[str] | str, capture_output: bool=False, shell: bool=False, dry_run: bool=False, skip_error: bool=False) -> None | subprocess.CompletedProcess[str]:
     if type(cmd) is str and not shell:
         cmd = cmd.split()
     """Run a system command and optionally return its output."""
     try:
         if not dry_run:
-            result = subprocess.run(cmd, capture_output=capture_output, text=True, check=True, shell=shell)
-            return result.stdout if capture_output else None
+            return subprocess.run(cmd, capture_output=capture_output, text=True, check=True, shell=shell)
         else:
             print(' '.join(cmd))
             return None
     except subprocess.CalledProcessError as e:
         if not skip_error:
             print(f"Error running command: {' '.join(cmd) if not shell else cmd}")
+            print(e)
             sys.exit(1)
         else:
             return None
 
 
-def get_active_ip_iface():
+def get_active_ip_iface() -> tuple[str, str]:
     """
     Get the active (non-loopback) interface and its IP.
     Uses 'ip route get 8.8.8.8' to determine the primary interface.
     """
     try:
-        route_out = run_cmd("ip route get 8.8.8.8", capture_output=True)
+        route_out = run_cmd("ip route get 8.8.8.8", capture_output=True).stdout
         # Example output: "8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.100 ..."
         tokens = route_out.split()
         iface = tokens[tokens.index("dev") + 1]
@@ -49,15 +73,303 @@ def get_active_ip_iface():
         sys.exit(1)
 
 
-def load_namespace_config(ns_name):
-    config_file = f"/tmp/nnsctl/{ns_name}/configuration.conf"
-    if not os.path.exists(config_file):
+def load_namespace_config(ns_name: str) -> None | NSInfo:
+    config_path = os.path.join(
+        ns_config_base_path,
+        ns_name,
+        "configuration.conf"
+    )
+    if not os.path.exists(config_path):
         return None
-    with open(config_file) as f:
-        return json.load(f)
+    with open(config_path) as f:
+        return NSInfo.model_validate_json(f.read())
 
 
-def create_namespace(args):
+def save_namespace_config(ns_name: str, config: NSInfo):
+    config_path = os.path.join(
+        ns_config_base_path,
+        ns_name,
+        "configuration.conf"
+    )
+    with open(config_path, "w") as f:
+        _ = f.write(config.model_dump_json(indent=2))
+
+
+def find_bottom_children(pid: int) -> list[psutil.Process]:
+    """
+    Recursively returns a list of all leaf (bottom-most) processes
+    in the process tree rooted at `pid`.
+    """
+    try:
+        process = psutil.Process(pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return []
+
+    children = process.children()
+    if not children:
+        # This process has no children, so it's a bottom-most process
+        return [process]
+
+    # Otherwise, collect bottom-most children of each child
+    bottom: list[psutil.Process] = []
+    for child in children:
+        bottom.extend(find_bottom_children(child.pid))
+    return bottom
+
+
+def create_namespace(args: argparse.Namespace) -> None:
+    ns_name: str = args.ns_name
+
+    # Set namespace creation flags
+    net = args.net
+    mount = args.mount
+    pid = args.pid
+    ipc = args.ipc
+    uts = args.uts
+    user = args.user
+    cgroup = args.cgroup
+    time_ns = args.time
+
+    sudo = args.sudo
+    
+    if args.all:
+        net = True
+        mount = True
+        pid = True
+        ipc = True
+        uts = True
+        user = True
+        cgroup = True
+        time_ns = True
+
+    # Check if the namespace already exists
+    if os.path.exists(f"{ns_config_base_path}/{ns_name}"):
+        print(f"Namespace {ns_name} already exists.")
+        sys.exit(1)
+    
+    # Create the namespaces using unshare
+    cmd = []
+    if sudo:
+        cmd += [ "sudo" ]
+    cmd += [ "unshare" ]
+    if net:
+        cmd += [ "--net" ]
+    if mount:
+        cmd += [ "--mount", "--propagation", "private" ]
+    if pid:
+        cmd += [ "--pid" ]
+    if ipc:
+        cmd += [ "--ipc" ]
+    if uts:
+        cmd += [ "--uts" ]
+    if user:
+        cmd += [ "--user" ]
+    if cgroup:
+        cmd += [ "--cgroup" ]
+    if time_ns:
+        cmd += [ "--time" ]
+
+    cmd += [ "--fork", "sleep", "infinity" ]
+
+    if args.dry_run:
+        print("Would try to create a namespace with the following command:")
+        print(" ".join(cmd))
+        return
+
+    # TODO: Make this more cross-platform
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True, # Create a new session, detaching the process
+    )
+
+    # Wait for the process to start, and check that it didn't fail
+    time.sleep(1)
+    if process.poll() is not None:
+        output = process.stdout.read().decode(encoding='utf-8')
+        if "unshare failed: Operation not permitted" in output:
+            raise RuntimeError("unshare failed: Operation not permitted. This may be due to missing capabilities.")
+        else:
+            raise RuntimeError(f"Failed to create namespace with unshare. It unexpectedly exited. Ouptut was:\n{output}")
+
+    # Find the bottom-most children of the unshare process
+    unshare_pid = process.pid
+    sleeper_pid = find_bottom_children(unshare_pid)
+
+    if len(sleeper_pid) == 0:
+        raise RuntimeError("Trying to find sleeper for pid {unshare_pid} but found none.")
+    if len(sleeper_pid) > 1:
+        raise RuntimeError("Found more than one sleeper for pid {unshare_pid}.")
+    sleeper_pid = sleeper_pid[0].pid
+
+    # Verify the sleeper is the sleep process
+    psutil.process = psutil.Process(sleeper_pid)
+    if psutil.process.name() != "sleep":
+        raise RuntimeError(f"Expected detected sleeper process at PID {sleeper_pid} to be 'sleep' but found {psutil.process.name()}. unshare PID was {unshare_pid}.")
+
+    # Create configuration data
+    config = NSInfo(
+        name=ns_name,
+        pid=sleeper_pid,
+        sudo=sudo,
+        namespaces=Namespaces(
+            net=net,
+            mount=mount,
+            pid=pid,
+            ipc=ipc,
+            uts=uts,
+            user=user,
+            cgroup=cgroup,
+            time=time_ns,
+        )
+    )
+
+    # Write configuration to file
+    ns_config_path = os.path.join(ns_config_base_path, ns_name)
+    if not os.path.exists(ns_config_path):
+        os.makedirs(ns_config_path)
+
+    save_namespace_config(ns_name, config=config)
+
+    print(f"Created namespace {ns_name} with PID {unshare_pid}")
+
+
+def show_namespace(args):
+    ns_name: str = args.ns_name
+
+    # Check if the namespace exists
+    if not os.path.exists(f"{ns_config_base_path}/{ns_name}"):
+        print(f"Namespace {ns_name} does not exist.")
+        sys.exit(1)
+
+    # Load the namespace configuration
+    ns_config = load_namespace_config(ns_name)
+    if ns_config is None:
+        print(f"Configuration for namespace {ns_name} not found.")
+        sys.exit(1)
+
+    print(f"Namespace {ns_name}:")
+    pprint(ns_config.model_dump())
+
+
+def stat_ns(path):
+    """
+    Return (st_dev, st_ino) for path. If os.stat() is denied, fall back to
+    `sudo stat -Lc "%d %i" path` and parse its output.
+    """
+    try:
+        st = os.stat(path)
+        return (st.st_dev, st.st_ino)
+    except PermissionError:
+        # fallback to sudo stat
+        try:
+            out = subprocess.check_output(
+                ["sudo", "stat", "-Lc", "%d %i", path],
+                text=True,
+                stderr=subprocess.DEVNULL
+            ).strip()
+            dev_str, ino_str = out.split()
+            return (int(dev_str), int(ino_str))
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to sudo‑stat {path}: {e}") from e
+
+
+def list_ns_entries(ns_dir):
+    """
+    Return a list of namespace entry names under ns_dir.
+    If os.listdir() is denied, use `sudo ls -1 ns_dir` to get them.
+    """
+    try:
+        return os.listdir(ns_dir)
+    except PermissionError:
+        out = subprocess.check_output(
+            ["sudo", "ls", "-1", ns_dir],
+            text=True,
+            stderr=subprocess.DEVNULL
+        )
+        return [line for line in out.splitlines() if line]
+
+
+def get_namespaced_pids(owner_pid, sudo=False):
+    """
+    Return a list of all PIDs on the host that live in exactly the same
+    set of namespaces as the given owner_pid.
+    """
+    owner_ns_dir = f'/proc/{owner_pid}/ns'
+    if not os.path.isdir(owner_ns_dir):
+        raise ValueError(f"No such process: {owner_pid}")
+
+    # 1) Record (st_dev, st_ino) for each namespace of the owner
+    owner_ns = {}
+    for ns_name in list_ns_entries(owner_ns_dir):
+        if 'children' in ns_name:
+            # Skip namespaces which have 'for_children' in the name.
+            continue
+        path = os.path.join(owner_ns_dir, ns_name)
+        try:
+            owner_ns[ns_name] = stat_ns(path)
+        except Exception:
+            continue
+
+    if not owner_ns:
+        raise RuntimeError(f"Could not read namespace info for PID {owner_pid}")
+
+    matching_pids = []
+    # 2) Scan every numeric entry in /proc
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit():
+            continue
+        pid = entry
+        ns_dir = f'/proc/{pid}/ns'
+        if not os.path.isdir(ns_dir):
+            continue
+
+        # 3) Compare each namespace inode+dev to the owner's
+        for ns_name, (dev, ino) in owner_ns.items():
+            other_path = os.path.join(ns_dir, ns_name)
+            try:
+                if stat_ns(other_path) != (dev, ino):
+                    break;
+            except Exception:
+                break
+
+        else:
+            # all namespaces matched
+            matching_pids.append(int(pid))
+
+    return sorted(matching_pids)
+
+
+def ps(args):
+    ns_name: str = args.ns_name
+    ps_args: list[str] = args.ps_args
+
+    # Get the namespace configuration
+    ns_config = load_namespace_config(ns_name)
+
+    if ns_config is None:
+        print(f"Namespace group {ns_name} does not exist.")
+        sys.exit(1)
+
+    ns_sudo = ns_config.sudo
+    namespaced_pids = get_namespaced_pids(ns_config.pid, sudo=ns_sudo)
+
+    if not namespaced_pids:
+        print("No processes found in namespace group {ns_name}.")
+        return
+
+    pid_list = ",".join(str(pid) for pid in namespaced_pids)
+
+    cmd = ["ps", "-f"]
+    if ps_args:
+        cmd.extend(ps_args)
+    cmd.extend(["-p", pid_list])
+
+    subprocess.run(cmd)
+
+
+def create_namespace_old(args):
     ns_name = args.ns_name
     host_ip = args.host_ip
     host_if = args.host_if
@@ -97,13 +409,13 @@ def create_namespace(args):
     ns_veth_ip_addr = f"{ns_subnet_triplet}.2"
 
     # Check if namespace already exists
-    existing = run_cmd("ip netns list", capture_output=True)
+    existing = run_cmd("ip netns list", capture_output=True).stdout
     if ns_name in existing:
         print(f"Namespace {ns_name} already exists.")
         sys.exit(1)
 
     # Create configuration directory and file
-    config_dir = f"/tmp/nnsctl/{ns_name}"
+    config_dir = f"{ns_config_base_path}/{ns_name}"
     config_file = os.path.join(config_dir, "configuration.conf")
     if not dry_run:
         os.makedirs(config_dir, exist_ok=True)
@@ -177,7 +489,7 @@ def create_namespace(args):
 
 def scrub_routes(subnet):
     print("Checking host routes...")
-    routes = run_cmd("ip route show", capture_output=True)
+    routes = run_cmd("ip route show", capture_output=True).stdout
     subnet_triplet = '.'.join(subnet.split('.')[:3])
     print(f"scrub triplet: {subnet_triplet}")
     if not routes:
@@ -195,7 +507,7 @@ def scrub_iptables_rules(subnet, iface):
     print("Checking iptables NAT rules...")
     subnet_triplet = '.'.join(subnet.split('.')[:3])
     print(f"scrub triplet: {subnet_triplet}")
-    rules = run_cmd(["sudo", "iptables", "-t", "nat", "-S"], capture_output=True)
+    rules = run_cmd(["sudo", "iptables", "-t", "nat", "-S"], capture_output=True).stdout
     if rules:
         for rule in rules.splitlines():
             # Check if the rule contains our problematic subnet
@@ -208,7 +520,7 @@ def scrub_iptables_rules(subnet, iface):
                     run_cmd(cmd)
 
     print("Checking iptables routing rules...")
-    rules = run_cmd(["sudo", "iptables", "-S"], capture_output=True)
+    rules = run_cmd(["sudo", "iptables", "-S"], capture_output=True).stdout
     if rules:
         for rule in rules.splitlines():
             # Check if the rule contains our problematic subnet
@@ -254,12 +566,12 @@ def destroy_namespace(args):
     ns_name = args.ns_name
     force = args.force
 
-    existing = run_cmd(["ip", "netns", "list"], capture_output=True)
+    existing = run_cmd(["ip", "netns", "list"], capture_output=True).stdout
     if ns_name in existing:
         print(f"Destroying network namespace {ns_name}")
 
         # Check for running processes inside the namespace
-        pids_result = run_cmd(["sudo", "ip", "netns", "pids", ns_name], capture_output=True)
+        pids_result = run_cmd(["sudo", "ip", "netns", "pids", ns_name], capture_output=True).stdout
         pids = pids_result.strip().split()
         if pids and not force:
             print("The following processes are still running in the namespace:")
@@ -286,7 +598,7 @@ def destroy_namespace(args):
         run_cmd(["sudo", "rm", "-rf", ns_resolv_dir])
 
     # Load configuration for the namespace
-    config_dir = f"/tmp/nnsctl/{ns_name}"
+    config_dir = f"{ns_config_base_path}/{ns_name}"
     if os.path.exists(config_dir):
         config_file = os.path.join(config_dir, "configuration.conf")
         namespace_config = load_namespace_config(ns_name)
@@ -304,8 +616,8 @@ def destroy_namespace(args):
         print(f"Configuration directory {config_dir} removed.")
 
     # Check if any other managed namespaces exist
-    if os.path.exists("/tmp/nnsctl"):
-        remaining_namespaces = os.listdir("/tmp/nnsctl")
+    if os.path.exists(ns_config_base_path):
+        remaining_namespaces = os.listdir(ns_config_base_path)
         if not remaining_namespaces:
             # Turn off IP forwarding if no other namespaces exist
             if is_ip_forwarding_enabled():
@@ -317,7 +629,7 @@ def destroy_namespace(args):
 
 def status_namespace(args):
     ns_name = args.ns_name
-    existing = run_cmd(["ip", "netns", "list"], capture_output=True)
+    existing = run_cmd(["ip", "netns", "list"], capture_output=True).stdout
 
     if ns_name is None:
         print("Host Status:")
@@ -345,7 +657,7 @@ def status_namespace(args):
     print("IPTables NAT")
     run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -S")
 
-    config_file = f"/tmp/nnsctl/{ns_name}/configuration.conf"
+    config_file = f"{ns_config_base_path}/{ns_name}/configuration.conf"
     namespace_config = load_namespace_config(ns_name)
     if namespace_config is not None:
         pprint(namespace_config)
@@ -365,7 +677,7 @@ def port_forward_add(args):
     port = args.port
     namespace_config = load_namespace_config(ns_name)
     if namespace_config is None:
-        print("Namespace not managed by nnsctl.")
+        print("Namespace not managed by nsctl.")
         sys.exit(1)
     host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
     ns_veth_ip_addr = namespace_config["ns_veth_ip_addr"]
@@ -389,7 +701,7 @@ def port_forward_del(args):
     port = args.port
     namespace_config = load_namespace_config(ns_name)
     if namespace_config is None:
-        print("Namespace not managed by nnsctl.")
+        print("Namespace not managed by nsctl.")
         sys.exit(1)
     host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
     ns_veth_ip_addr = namespace_config["ns_veth_ip_addr"]
@@ -410,7 +722,7 @@ def x_forward_add(args):
     ns_name = args.ns_name
     namespace_config = load_namespace_config(ns_name)
     if namespace_config is None:
-        print("Namespace not managed by nnsctl.")
+        print("Namespace not managed by nsctl.")
         sys.exit(1)
     host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
     ns_veth_ip_addr = namespace_config["ns_veth_ip_addr"]
@@ -445,7 +757,7 @@ def x_forward_del(args):
     ns_name = args.ns_name
     namespace_config = load_namespace_config(ns_name)
     if namespace_config is None:
-        print("Namespace not managed by nnsctl.")
+        print("Namespace not managed by nsctl.")
         sys.exit(1)
     host_veth_ip_addr = namespace_config["host_veth_ip_addr"]
     ns_veth_ip_addr = namespace_config["ns_veth_ip_addr"]
@@ -463,54 +775,80 @@ def x_forward_del(args):
 
 
 def list_namespaces(args):
-    print("Listing network namespaces managed by nnsctl:")
-    # We list namespaces that have a configuration file under /tmp/nnsctl.
-    base_dir = "/tmp/nnsctl"
-    if os.path.exists(base_dir):
-        for ns in os.listdir(base_dir):
+    print("Listing Namespace groups managed by nsctl:")
+    # We list namespaces that have a configuration file under ns_config_base_path.
+    if os.path.exists(ns_config_base_path):
+        for ns in os.listdir(ns_config_base_path):
             print(ns)
     else:
-        print("No namespaces found.")
+        print("No namespaces groups found.")
+
+
+def currently_not_implemented(args):
+    raise NotImplementedError("This command is not implemented yet.")
+
 
 def main():
-    parser = argparse.ArgumentParser(prog="nnsctl", description="Network namespace control tool")
-    parser.add_argument("--version", action="version", version=f"nnsctl {VERSION}")
+    parser = argparse.ArgumentParser(prog="nsctl", description="Namespace group control tool")
+    parser.add_argument("--version", action="version", version=f"nsctl {VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    ns_name_help = "Name of the namespace group"
 
     # list command
-    parser_list = subparsers.add_parser("list", help="List network namespaces managed by nnsctl")
+    parser_list = subparsers.add_parser("list", help="List namespace groups managed by nsctl")
     parser_list.set_defaults(func=list_namespaces)
 
     def add_dry_run(parser):
         parser.add_argument("--dry-run", help="If passed report the commands that would be run but not execute them", action="store_true")
 
     # create command
-    parser_create = subparsers.add_parser("create", help="Create a new network namespace")
-    parser_create.add_argument("ns_name", help="Name of the network namespace")
-    parser_create.add_argument("--host-if", help="Host interface to use")
-    parser_create.add_argument("--ns-subnet", help="Namespace subnet to use")
-    parser_create.add_argument("--host-ip", help="Host IP address")
+    parser_create = subparsers.add_parser("create", help="Create a new namespace group")
+    parser_create.add_argument("ns_name", help=ns_name_help, type=str)
+    parser_create.add_argument("--net", help="Create a network namespace", action="store_true")
+    parser_create.add_argument("--mount", help="Create a mount namespace", action="store_true")
+    parser_create.add_argument("--pid", help="Create a pid namespace", action="store_true")
+    parser_create.add_argument("--ipc", help="Create an ipc namespace", action="store_true")
+    parser_create.add_argument("--uts", help="Create an ipc namespace", action="store_true")
+    parser_create.add_argument("--user", help="Create a user namespace", action="store_true")
+    parser_create.add_argument("--cgroup", help="Create a cgroup namespace", action="store_true")
+    parser_create.add_argument("--time", help="Create a time namespace", action="store_true")
+    parser_create.add_argument("--all", help="Create all namespaces", action="store_true")
+    parser_create.add_argument("--sudo", help="Use sudo to create the namespace", action="store_true")
     add_dry_run(parser_create)
     parser_create.set_defaults(func=create_namespace)
 
+    # show command
+    parser_show = subparsers.add_parser("show", help="Show information about a particular namespace group")
+    parser_show.add_argument("ns_name", help=ns_name_help, type=str)
+    parser_show.set_defaults(func=show_namespace)
+
     # destroy command
-    parser_destroy = subparsers.add_parser("destroy", help="Destroy a network namespace")
-    parser_destroy.add_argument("ns_name", help="Name of the network namespace")
+    parser_destroy = subparsers.add_parser("destroy", help="Destroy a namespace group")
+    parser_destroy.add_argument("ns_name", help=ns_name_help)
     parser_destroy.add_argument("--force", action="store_true", help="Force kill running processes in the namespace")
     add_dry_run(parser_destroy)
-    parser_destroy.set_defaults(func=destroy_namespace)
+    #parser_destroy.set_defaults(func=destroy_namespace)
+    parser_destroy.set_defaults(func=currently_not_implemented)
 
     # status command
     parser_status = subparsers.add_parser("status", help="Get status of a network namespace")
-    parser_status.add_argument("ns_name", nargs="?", help="Name of the network namespace")
-    parser_status.set_defaults(func=status_namespace)
+    parser_status.add_argument("ns_name", nargs="?", help=ns_name_help)
+    #parser_status.set_defaults(func=status_namespace)
+    parser_status.set_defaults(func=currently_not_implemented)
+
+    # ps command
+    parser_ps = subparsers.add_parser("ps", help="Perform a ps on programs in a specific namespace")
+    parser_ps.add_argument("ns_name", help=ns_name_help)
+    parser_ps.add_argument("ps_args", nargs=argparse.REMAINDER, help="Other arguments to pass to ps")
+    parser_ps.set_defaults(func=ps)
 
     # exec command
     parser_exec = subparsers.add_parser("exec", help="Execute a command inside a network namespace")
-    parser_exec.add_argument("ns_name", help="Name of the network namespace")
+    parser_exec.add_argument("ns_name", help=ns_name_help)
     parser_exec.add_argument("command", nargs=argparse.REMAINDER, help="Command to execute")
     add_dry_run(parser_exec)
-    parser_exec.set_defaults(func=exec_in_namespace)
+    #parser_exec.set_defaults(func=exec_in_namespace)
+    parser_exec.set_defaults(func=currently_not_implemented)
 
     # port-forward command
     parser_port_forward = subparsers.add_parser("port-forward", help="Utilities for forwarding a port between host and namespace")
@@ -518,17 +856,19 @@ def main():
 
     # port-forward add command
     parser_port_forward_add = port_forward_subparsers.add_parser("add", help="Add port forwarding for a particular port")
-    parser_port_forward_add.add_argument("ns_name", help="Name of the network namespace")
+    parser_port_forward_add.add_argument("ns_name", help=ns_name_help)
     parser_port_forward_add.add_argument("port", type=int, help="Port number to forward")
     add_dry_run(parser_port_forward_add)
-    parser_port_forward_add.set_defaults(func=port_forward_add)
+    #parser_port_forward_add.set_defaults(func=port_forward_add)
+    parser_port_forward_add.set_defaults(func=currently_not_implemented)
 
     # port-forward del command
     parser_port_forward_del = port_forward_subparsers.add_parser("del", help="Delete port forwarding for a particular port")
-    parser_port_forward_del.add_argument("ns_name", help="Name of the network namespace")
+    parser_port_forward_del.add_argument("ns_name", help=ns_name_help)
     parser_port_forward_del.add_argument("port", type=int, help="Port number to forward")
     add_dry_run(parser_port_forward_del)
-    parser_port_forward_del.set_defaults(func=port_forward_del)
+    #parser_port_forward_del.set_defaults(func=port_forward_del)
+    parser_port_forward_del.set_defaults(func=currently_not_implemented)
 
     # x-forward command
     parser_x_forward = subparsers.add_parser("x-forward", help="Forward X server ports (6000:6100) from host to namespace")
@@ -536,15 +876,17 @@ def main():
 
     # x-forward add command
     parser_x_forward_add = parser_x_forward_subparsers.add_parser("add", help="Add X server port forwarding")
-    parser_x_forward_add.add_argument("ns_name", help="Name of the network namespace")
+    parser_x_forward_add.add_argument("ns_name", help=ns_name_help)
     add_dry_run(parser_x_forward_add)
-    parser_x_forward_add.set_defaults(func=x_forward_add)
+    #parser_x_forward_add.set_defaults(func=x_forward_add)
+    parser_x_forward_add.set_defaults(func=currently_not_implemented)
 
     # x-forward del command
     parser_x_forward_del = parser_x_forward_subparsers.add_parser("del", help="Delete X server port forwarding")
-    parser_x_forward_del.add_argument("ns_name", help="Name of the network namespace")
+    parser_x_forward_del.add_argument("ns_name", help=ns_name_help)
     add_dry_run(parser_x_forward_del)
-    parser_x_forward_del.set_defaults(func=x_forward_del)
+    #parser_x_forward_del.set_defaults(func=x_forward_del)
+    parser_x_forward_del.set_defaults(func=currently_not_implemented)
 
     args = parser.parse_args()
     args.func(args)
