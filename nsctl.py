@@ -813,7 +813,8 @@ def exec_in_namespace(args):
     if ns_config.namespaces.time:
         ns_args.append("--time")
 
-    print("DRY_RUN: ", args.dry_run)
+    # Add working directory
+    ns_args.append(f"--wd={os.getcwd()}")
 
     # Check if we're the root user
     if os.geteuid() == 0:
@@ -822,9 +823,11 @@ def exec_in_namespace(args):
         run_cmd(cmd, dry_run=args.dry_run)
     else:
         if args.as_user:
-            cmd = ["nsenter", "-t", str(pid), ] + ns_args + ["sudo", "-u", user] + args.command
+            uid = str(run_cmd(f"id -u {user}", capture_output=True).stdout.strip())
+            gid = str(run_cmd(f"id -g {user}", capture_output=True).stdout.strip())
+            cmd = ["nsenter", "-t", str(pid), ] + ns_args + [f"--setuid={uid}", f"--setgid={gid}"] + ["--"] + args.command
         else:
-            cmd = ["nsenter", "-t", str(pid), ] + ns_args + args.command
+            cmd = ["nsenter", "-t", str(pid), ] + ns_args + ["--"] + args.command
         run_cmd_sudo(cmd, dry_run=args.dry_run)
 
 
@@ -1000,7 +1003,7 @@ def main():
     # exec command
     parser_exec = subparsers.add_parser("exec", help="Execute a command inside a network namespace")
     add_dry_run(parser_exec)
-    parser_exec.add_argument('--as-user', help="Use sudo -u to execute the command as your user inside the namespace")
+    parser_exec.add_argument('--as-user', help="Use sudo -u to execute the command as your user inside the namespace", action='store_true')
     parser_exec.add_argument("ns_name", help=ns_name_help)
     parser_exec.add_argument("command", nargs=argparse.REMAINDER, help="Command to execute")
     parser_exec.set_defaults(func=exec_in_namespace)
