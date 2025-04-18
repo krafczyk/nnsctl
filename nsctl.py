@@ -34,7 +34,6 @@ class Namespaces(BaseModel):
 class NSInfo(BaseModel):
     name: str
     pid: int
-    sudo: bool
     namespaces: Namespaces
 
 
@@ -97,23 +96,74 @@ def check_ops(ops: list[str]) -> bool:
     return True
 
 
-def run_cmd(cmd: list[str] | str, capture_output: bool=False, shell: bool=False, dry_run: bool=False, skip_error: bool=False) -> None | subprocess.CompletedProcess[str]:
-    if type(cmd) is str and not shell:
+def run_cmd(cmd: list[str] | str,
+            capture_output: bool=False,
+            shell: bool=False,
+            dry_run: bool=False,
+            skip_error: bool=False,
+            try_sudo: bool=False
+           ) -> None | subprocess.CompletedProcess[str]:
+    """
+    Runs a command, and if try_sudo=True and it fails with a permission error,
+    retries exactly once with sudo.
+    """
+    # if it's a string but not using shell, split it
+    if isinstance(cmd, str) and not shell:
         cmd = cmd.split()
-    """Run a system command and optionally return its output."""
+
+    # dry run?
+    if dry_run:
+        printable = cmd if isinstance(cmd, str) else " ".join(cmd)
+        print("DRY-RUN:", printable)
+        return None
+
     try:
-        if not dry_run:
-            return subprocess.run(cmd, capture_output=capture_output, text=True, check=True, shell=shell)
-        else:
-            print(' '.join(cmd))
-            return None
+        return subprocess.run(
+            cmd,
+            capture_output=capture_output,
+            text=True,
+            check=True,
+            shell=shell
+        )
+
     except subprocess.CalledProcessError as e:
-        if not skip_error:
-            print(f"Error running command: {' '.join(cmd) if not shell else cmd}")
-            print(e)
-            sys.exit(1)
-        else:
+        if skip_error:
+            print(f"Warning: Command failed with error: {e}", file=sys.stderr)
             return None
+
+        # only consider sudo-retry if opted in and not running as root
+        if try_sudo and os.geteuid() != 0:
+            out = (e.stderr or "") + (e.stdout or "")
+            if ("Permission denied" in out
+                or "Operation not permitted" in out
+                or e.returncode in (1, 126)
+            ):
+                # build the sudo command
+                if shell:
+                    base = cmd if isinstance(cmd, str) else " ".join(cmd)
+                    sudo_cmd = f"sudo {base}"
+                else:
+                    sudo_cmd = ["sudo"] + (cmd if isinstance(cmd, list) else cmd.split())
+                print(f"Retrying with sudo: {sudo_cmd}", file=sys.stderr)
+                # retry once, but disable further sudo attempts
+                return run_cmd(
+                    sudo_cmd,
+                    capture_output=capture_output,
+                    shell=shell,
+                    dry_run=dry_run,
+                    skip_error=skip_error,
+                    try_sudo=False
+                )
+
+        # still failed (or not a permission error)
+        printable = cmd if isinstance(cmd, str) else " ".join(cmd)
+        print(f"Error running command: {printable}", file=sys.stderr)
+        print(e.stderr or e, file=sys.stderr)
+        return None
+
+
+def run_cmd_sudo(*args, **kwargs):
+    return run_cmd(*args, try_sudo=True, **kwargs)
 
 
 def get_active_ip_iface() -> tuple[str, str]:
@@ -191,8 +241,7 @@ def create_namespace(args: argparse.Namespace) -> None:
     cgroup = args.cgroup
     time_ns = args.time
 
-    sudo = args.sudo
-    
+   
     if args.all:
         net = True
         mount = True
@@ -209,10 +258,7 @@ def create_namespace(args: argparse.Namespace) -> None:
         sys.exit(1)
     
     # Create the namespaces using unshare
-    cmd = []
-    if sudo:
-        cmd += [ "sudo" ]
-    cmd += [ "unshare" ]
+    cmd = [ "unshare" ]
     if net:
         cmd += [ "--net" ]
     if mount:
@@ -273,7 +319,6 @@ def create_namespace(args: argparse.Namespace) -> None:
     config = NSInfo(
         name=ns_name,
         pid=sleeper_pid,
-        sudo=sudo,
         namespaces=Namespaces(
             net=net,
             mount=mount,
@@ -296,6 +341,12 @@ def create_namespace(args: argparse.Namespace) -> None:
     print(f"Created namespace {ns_name} with PID {unshare_pid}")
 
 
+def validate_ns_config(ns_config):
+    if ns_config is None:
+        print(f"Configuration for namespace {ns_name} not found.")
+        sys.exit(1)
+
+
 def show_namespace(args):
     ns_name: str = args.ns_name
 
@@ -306,9 +357,7 @@ def show_namespace(args):
 
     # Load the namespace configuration
     ns_config = load_namespace_config(ns_name)
-    if ns_config is None:
-        print(f"Configuration for namespace {ns_name} not found.")
-        sys.exit(1)
+    validate_ns_config(ns_config)
 
     print(f"Namespace {ns_name}:")
     pprint(ns_config.model_dump())
@@ -352,14 +401,16 @@ def list_ns_entries(ns_dir):
         return [line for line in out.splitlines() if line]
 
 
-def get_namespaced_pids(owner_pid, sudo=False):
+def get_namespaced_pids(owner_pid):
     """
     Return a list of all PIDs on the host that live in exactly the same
-    set of namespaces as the given owner_pid.
+    set of namespaces as the given owner_pid. If the owner_pid doesn't
+    exist, return an empty list.
     """
     owner_ns_dir = f'/proc/{owner_pid}/ns'
     if not os.path.isdir(owner_ns_dir):
-        raise ValueError(f"No such process: {owner_pid}")
+        # No such process!
+        return []
 
     # 1) Record (st_dev, st_ino) for each namespace of the owner
     owner_ns = {}
@@ -408,13 +459,9 @@ def ps(args):
 
     # Get the namespace configuration
     ns_config = load_namespace_config(ns_name)
+    validate_ns_config(ns_config)
 
-    if ns_config is None:
-        print(f"Namespace group {ns_name} does not exist.")
-        sys.exit(1)
-
-    ns_sudo = ns_config.sudo
-    namespaced_pids = get_namespaced_pids(ns_config.pid, sudo=ns_sudo)
+    namespaced_pids = get_namespaced_pids(ns_config.pid)
 
     if not namespaced_pids:
         print("No processes found in namespace group {ns_name}.")
@@ -484,24 +531,24 @@ def create_namespace_old(args):
         print(f"Would create directory {config_dir}")
 
     print(f"Creating network namespace {ns_name}")
-    run_cmd(f"sudo ip netns add {ns_name}", dry_run=dry_run)
+    run_cmd_sudo(f"ip netns add {ns_name}", dry_run=dry_run)
     print(f"Creating veth pair {host_veth} <-> {ns_veth}")
-    run_cmd(f"sudo ip link add {host_veth} type veth peer name {ns_veth}", dry_run=dry_run)
+    run_cmd_sudo(f"ip link add {host_veth} type veth peer name {ns_veth}", dry_run=dry_run)
     print(f"Moving {ns_veth} into namespace {ns_name}")
-    run_cmd(f"sudo ip link set {ns_veth} netns {ns_name}", dry_run=dry_run)
+    run_cmd_sudo(f"ip link set {ns_veth} netns {ns_name}", dry_run=dry_run)
 
     print("Configuring IP addresses and interfaces")
     # Assigning IP addresses
-    run_cmd(f"sudo ip addr add {host_veth_ip_addr}/24 dev {host_veth}", dry_run=dry_run)
-    run_cmd(f"sudo ip netns exec {ns_name} ip addr add {ns_veth_ip_addr}/24 dev {ns_veth}", dry_run=dry_run)
+    run_cmd_sudo(f"ip addr add {host_veth_ip_addr}/24 dev {host_veth}", dry_run=dry_run)
+    run_cmd_sudo(f"ip netns exec {ns_name} ip addr add {ns_veth_ip_addr}/24 dev {ns_veth}", dry_run=dry_run)
 
     # Bring up the interfaces
-    run_cmd(f"sudo ip link set {host_veth} up", dry_run=dry_run)
-    run_cmd(f"sudo ip netns exec {ns_name} ip link set {ns_veth} up", dry_run=dry_run)
-    run_cmd(f"sudo ip netns exec {ns_name} ip link set lo up", dry_run=dry_run)
+    run_cmd_sudo(f"ip link set {host_veth} up", dry_run=dry_run)
+    run_cmd_sudo(f"ip netns exec {ns_name} ip link set {ns_veth} up", dry_run=dry_run)
+    run_cmd_sudo(f"ip netns exec {ns_name} ip link set lo up", dry_run=dry_run)
 
     # Set default route within the namespace
-    run_cmd(f"sudo ip netns exec {ns_name} ip route add default via {host_veth_ip_addr}", dry_run=dry_run)
+    run_cmd_sudo(f"ip netns exec {ns_name} ip route add default via {host_veth_ip_addr}", dry_run=dry_run)
 
     print("Enabling IP forwarding")
     enable_ip_forwarding(dry_run=dry_run)
@@ -514,17 +561,17 @@ def create_namespace_old(args):
         host_ip = detected_ip
 
     print("Setting iptables routing rules")
-    run_cmd(f"sudo iptables -I FORWARD -i {host_veth} -o {host_if} -j ACCEPT")
-    run_cmd(f"sudo iptables -I FORWARD -i {host_if} -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT")
-    run_cmd(f"sudo iptables -t nat -A POSTROUTING -s {ns_subnet}/24 -o {host_if} -j MASQUERADE", dry_run=dry_run)
+    run_cmd_sudo(f"iptables -I FORWARD -i {host_veth} -o {host_if} -j ACCEPT")
+    run_cmd_sudo(f"iptables -I FORWARD -i {host_if} -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT")
+    run_cmd_sudo(f"iptables -t nat -A POSTROUTING -s {ns_subnet}/24 -o {host_if} -j MASQUERADE", dry_run=dry_run)
 
     # Allow forwarding from the namespace veth to the loopback interface, useful for port forwarding
-    run_cmd(f"sudo iptables -A FORWARD -i lo -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT")
+    run_cmd_sudo(f"iptables -A FORWARD -i lo -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT")
 
     print("Configuring DNS for the namespace")
     ns_resolv_dir = f"/etc/netns/{ns_name}"
-    run_cmd(f"sudo mkdir -p {ns_resolv_dir}", dry_run=dry_run)
-    run_cmd(f"sudo cp /etc/resolv.conf {os.path.join(ns_resolv_dir, 'resolv.conf')}", dry_run=dry_run)
+    run_cmd_sudo(f"mkdir -p {ns_resolv_dir}", dry_run=dry_run)
+    run_cmd_sudo(f"cp /etc/resolv.conf {os.path.join(ns_resolv_dir, 'resolv.conf')}", dry_run=dry_run)
 
     config_data = {
         "ns_name": ns_name,
@@ -561,14 +608,14 @@ def scrub_routes(subnet):
             print(f"Removing route: {line}")
             # Remove the route by reusing the route specification.
             # This may fail if additional fields cause mismatches, so you might need to adjust the parsing.
-            run_cmd(["sudo", "ip", "route", "del"] + line.split())
+            run_cmd_sudo(["ip", "route", "del"] + line.split())
 
 
 def scrub_iptables_rules(subnet, iface):
     print("Checking iptables NAT rules...")
     subnet_triplet = '.'.join(subnet.split('.')[:3])
     print(f"scrub triplet: {subnet_triplet}")
-    rules = run_cmd(["sudo", "iptables", "-t", "nat", "-S"], capture_output=True).stdout
+    rules = run_cmd_sudo(["iptables", "-t", "nat", "-S"], capture_output=True).stdout
     if rules:
         for rule in rules.splitlines():
             # Check if the rule contains our problematic subnet
@@ -576,12 +623,12 @@ def scrub_iptables_rules(subnet, iface):
                 # We only want to delte rules that were added (lines starting with "-A")
                 if rule.startswith("-A"):
                     delete_rule = rule.replace("-A", "-D", 1)
-                    cmd = ["sudo", "iptables", "-t", "nat"] + delete_rule.split()
+                    cmd = ["iptables", "-t", "nat"] + delete_rule.split()
                     print(f"Deleting iptables NAT rule: {delete_rule}")
-                    run_cmd(cmd)
+                    run_cmd_sudo(cmd)
 
     print("Checking iptables routing rules...")
-    rules = run_cmd(["sudo", "iptables", "-S"], capture_output=True).stdout
+    rules = run_cmd_sudo(["iptables", "-S"], capture_output=True).stdout
     if rules:
         for rule in rules.splitlines():
             # Check if the rule contains our problematic subnet
@@ -589,9 +636,9 @@ def scrub_iptables_rules(subnet, iface):
                 # We only want to delte rules that were added (lines starting with "-A")
                 if rule.startswith("-A"):
                     delete_rule = rule.replace("-A", "-D", 1)
-                    cmd = ["sudo", "iptables" ] + delete_rule.split()
+                    cmd = ["iptables" ] + delete_rule.split()
                     print(f"Deleting iptables routing rule: {delete_rule}")
-                    run_cmd(cmd)
+                    run_cmd_sudo(cmd)
 
 
 def is_ip_forwarding_enabled() -> bool:
@@ -603,76 +650,82 @@ def is_ip_forwarding_enabled() -> bool:
 
 def enable_route_localnet(iface, ns_name=None, dry_run=False):
     if ns_name is None:
-        run_cmd(f"sudo sysctl -w net.ipv4.conf.{iface}.route_localnet=1", dry_run=dry_run)
+        run_cmd_sudo(f"sysctl -w net.ipv4.conf.{iface}.route_localnet=1", dry_run=dry_run)
     else:
-        run_cmd(f"sudo ip netns exec {ns_name} sysctl -w net.ipv4.conf.{iface}.route_localnet=1", dry_run=dry_run)
+        run_cmd_sudo(f"ip netns exec {ns_name} sysctl -w net.ipv4.conf.{iface}.route_localnet=1", dry_run=dry_run)
 
 
 def disable_route_localnet(iface, ns_name=None, dry_run=False):
     if ns_name is None:
-        run_cmd(f"sudo sysctl -w net.ipv4.conf.{iface}.route_localnet=0", dry_run=dry_run)
+        run_cmd_sudo(f"sysctl -w net.ipv4.conf.{iface}.route_localnet=0", dry_run=dry_run)
     else:
-        run_cmd(f"sudo ip netns exec {ns_name} sysctl -w net.ipv4.conf.{iface}.route_localnet=0", dry_run=dry_run)
+        run_cmd_sudo(f"ip netns exec {ns_name} sysctl -w net.ipv4.conf.{iface}.route_localnet=0", dry_run=dry_run)
 
 
 def enable_ip_forwarding(dry_run=False):
-    run_cmd(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"], dry_run=dry_run)
+    run_cmd_sudo("sysctl -w net.ipv4.ip_forward=1", dry_run=dry_run)
 
 
 def disable_ip_forwarding(dry_run=False):
-    run_cmd(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=0"], dry_run=dry_run)
+    run_cmd_sudo("sysctl -w net.ipv4.ip_forward=0", dry_run=dry_run)
+
+
+def process_exists(pid):
+    if os.path.exists(f"/proc/{pid}"):
+        try:
+            process = psutil.Process(pid)
+            return process.is_running()
+        except psutil.NoSuchProcess:
+            return False
 
 
 def destroy_namespace(args):
     ns_name = args.ns_name
     force = args.force
 
-    existing = run_cmd(["ip", "netns", "list"], capture_output=True).stdout
-    if ns_name in existing:
-        print(f"Destroying network namespace {ns_name}")
+    # Get the namespace configuration
+    ns_config = load_namespace_config(ns_name)
+    validate_ns_config(ns_config)
+    print(f"Destroying network namespace {ns_name}")
 
-        # Check for running processes inside the namespace
-        pids_result = run_cmd(["sudo", "ip", "netns", "pids", ns_name], capture_output=True).stdout
-        pids = pids_result.strip().split()
-        if pids and not force:
-            print("The following processes are still running in the namespace:")
-            for pid in pids:
-                print(pid)
-            print("Use --force to kill these processes and proceed with destroying the namespace.")
-            sys.exit(1)
-        elif pids and force:
-            print("Killing processes in the namespace:")
-            for pid in pids:
-                print(f"Killing PID {pid}")
-                subprocess.run(["sudo", "kill", "-TERM", pid])
-            time.sleep(5)
-            for pid in pids:
-                subprocess.run(["sudo", "kill", "-KILL", pid])
+    print(f"Seeing if there are still processes in the namespace {ns_name}")
+    owner_pid = ns_config.pid
 
+    namespaced_pids = get_namespaced_pids(owner_pid)
+    pids = [ p for p in namespaced_pids if p != owner_pid ]
+
+    if pids and not force:
+        print("The following processes are still running in the namespace:")
+        for pid in pids:
+            print(pid)
+        print("Use --force to kill these processes and proceed with destroying the namespace.")
+        sys.exit(1)
+
+    elif pids and force:
+        print("Killing processes in the namespace:")
+        for pid in pids:
+            print(f"Killing PID {pid}")
+            run_cmd_sudo(["kill", "-TERM", pid])
+        time.sleep(5)
+        for pid in pids:
+            if process_exists(pid):
+                run_cmd_sudo(["kill", "-KILL", pid])
+
+    if process_exists(owner_pid):
         # Delete the namespace
-        run_cmd(["sudo", "ip", "netns", "del", ns_name])
+        run_cmd_sudo(["kill", "-TERM", owner_pid])
+        time.sleep(5)
+        run_cmd_sudo(["kill", "-KILL", owner_pid])
         print(f"Namespace {ns_name} destroyed.")
 
-    # Remove the DNS configuration for the namespace
-    ns_resolv_dir = f"/etc/netns/{ns_name}"
-    if os.path.exists(os.path.join(ns_resolv_dir, "resolv.conf")):
-        run_cmd(["sudo", "rm", "-rf", ns_resolv_dir])
+    # # Remove the DNS configuration for the namespace
+    # ns_resolv_dir = f"/etc/netns/{ns_name}"
+    # if os.path.exists(os.path.join(ns_resolv_dir, "resolv.conf")):
+    #     run_cmd_sudo(["rm", "-rf", ns_resolv_dir])
 
     # Load configuration for the namespace
     config_dir = f"{ns_config_base_path}/{ns_name}"
     if os.path.exists(config_dir):
-        config_file = os.path.join(config_dir, "configuration.conf")
-        namespace_config = load_namespace_config(ns_name)
-        if namespace_config is not None:
-            # Attempt to remove iptables rules (errors are ignored)
-            ns_subnet = namespace_config["ns_subnet"]
-            host_veth = namespace_config["host_veth"]
-            scrub_routes(ns_subnet)
-            scrub_iptables_rules(ns_subnet, host_veth)
-            print(f"Routes and NAT rules scrubbed")
-            # Deleting host_veth iface
-            run_cmd("sudo ip link del " + host_veth, skip_error=True)
-            print(f"Host interface {host_veth} deleted.")
         shutil.rmtree(config_dir, ignore_errors=True)
         print(f"Configuration directory {config_dir} removed.")
 
@@ -699,9 +752,9 @@ def status_namespace(args):
         print("Routes")
         run_cmd("ip route show")
         print("IPTables")
-        run_cmd("sudo iptables -S")
+        run_cmd_sudo("iptables -S")
         print("IPTables NAT")
-        run_cmd("sudo iptables -t nat -S")
+        run_cmd_sudo("iptables -t nat -S")
         sys.exit(0)
 
     if ns_name not in existing:
@@ -710,13 +763,13 @@ def status_namespace(args):
 
     print(f"Namespace {ns_name}:")
     print("IP Addresses")
-    run_cmd(f"sudo ip netns exec {ns_name} ip addr show")
+    run_cmd_sudo(f"ip netns exec {ns_name} ip addr show")
     print("Routes")
-    run_cmd(f"sudo ip netns exec {ns_name} ip route show")
+    run_cmd_sudo(f"ip netns exec {ns_name} ip route show")
     print("IPTables")
-    run_cmd(f"sudo ip netns exec {ns_name} iptables -S")
+    run_cmd_sudo(f"ip netns exec {ns_name} iptables -S")
     print("IPTables NAT")
-    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -S")
+    run_cmd_sudo(f"ip netns exec {ns_name} iptables -t nat -S")
 
     config_file = f"{ns_config_base_path}/{ns_name}/configuration.conf"
     namespace_config = load_namespace_config(ns_name)
@@ -874,7 +927,6 @@ def main():
     parser_create.add_argument("--cgroup", help="Create a cgroup namespace", action="store_true")
     parser_create.add_argument("--time", help="Create a time namespace", action="store_true")
     parser_create.add_argument("--all", help="Create all namespaces", action="store_true")
-    parser_create.add_argument("--sudo", help="Use sudo to create the namespace", action="store_true")
     add_dry_run(parser_create)
     parser_create.set_defaults(func=create_namespace)
 
@@ -888,8 +940,7 @@ def main():
     parser_destroy.add_argument("ns_name", help=ns_name_help)
     parser_destroy.add_argument("--force", action="store_true", help="Force kill running processes in the namespace")
     add_dry_run(parser_destroy)
-    #parser_destroy.set_defaults(func=destroy_namespace)
-    parser_destroy.set_defaults(func=currently_not_implemented)
+    parser_destroy.set_defaults(func=destroy_namespace)
 
     # status command
     parser_status = subparsers.add_parser("status", help="Get status of a network namespace")
