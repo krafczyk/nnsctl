@@ -241,6 +241,7 @@ def create_namespace(args: argparse.Namespace) -> None:
     cgroup = args.cgroup
     time_ns = args.time
 
+    sudo = args.sudo
    
     if args.all:
         net = True
@@ -277,6 +278,9 @@ def create_namespace(args: argparse.Namespace) -> None:
         cmd += [ "--time" ]
 
     cmd += [ "--fork", "sleep", "infinity" ]
+
+    if sudo:
+        cmd = ["sudo"] + cmd
 
     if args.dry_run:
         print("Would try to create a namespace with the following command:")
@@ -965,6 +969,7 @@ def main():
     parser_create.add_argument("--cgroup", help="Create a cgroup namespace", action="store_true")
     parser_create.add_argument("--time", help="Create a time namespace", action="store_true")
     parser_create.add_argument("--all", help="Create all namespaces", action="store_true")
+    parser_create.add_argument("--sudo", help="Use sudo to create the namespace", action="store_true")
     add_dry_run(parser_create)
     parser_create.set_defaults(func=create_namespace)
 
