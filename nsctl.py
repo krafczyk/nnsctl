@@ -705,17 +705,17 @@ def destroy_namespace(args):
         print("Killing processes in the namespace:")
         for pid in pids:
             print(f"Killing PID {pid}")
-            run_cmd_sudo(["kill", "-TERM", pid])
+            run_cmd_sudo(["kill", "-TERM", str(pid)])
         time.sleep(5)
         for pid in pids:
             if process_exists(pid):
-                run_cmd_sudo(["kill", "-KILL", pid])
+                run_cmd_sudo(["kill", "-KILL", str(pid)])
 
     if process_exists(owner_pid):
         # Delete the namespace
-        run_cmd_sudo(["kill", "-TERM", owner_pid])
+        run_cmd_sudo(["kill", "-TERM", str(owner_pid)])
         time.sleep(5)
-        run_cmd_sudo(["kill", "-KILL", owner_pid])
+        run_cmd_sudo(["kill", "-KILL", str(owner_pid)])
         print(f"Namespace {ns_name} destroyed.")
 
     # # Remove the DNS configuration for the namespace
@@ -779,12 +779,50 @@ def status_namespace(args):
 def exec_in_namespace(args):
     import getpass
     user = getpass.getuser()
+
     ns_name = args.ns_name
+
     if not args.command:
         print("No command specified for exec.")
         sys.exit(1)
-    full_cmd = ["sudo", "ip", "netns", "exec", ns_name, "sudo", "-u", user] + args.command
-    subprocess.run(full_cmd)
+
+    ns_config = load_namespace_config(ns_name)
+    validate_ns_config(ns_config)
+
+    pid = ns_config.pid
+
+    ns_args = []
+    if ns_config.namespaces.net:
+        ns_args.append("--net")
+    if ns_config.namespaces.mount:
+        ns_args.append("--mount")
+    if ns_config.namespaces.pid:
+        ns_args.append("--pid")
+    if ns_config.namespaces.ipc:
+        ns_args.append("--ipc")
+    if ns_config.namespaces.uts:
+        ns_args.append("--uts")
+    if ns_config.namespaces.user:
+        ns_args.extend(["--user"])
+    if ns_config.namespaces.cgroup:
+        ns_args.append("--cgroup")
+    if ns_config.namespaces.time:
+        ns_args.append("--time")
+
+    print("DRY_RUN: ", args.dry_run)
+
+    # Check if we're the root user
+    if os.geteuid() == 0:
+        # We're root, so we can use nsenter directly
+        cmd = ["nsenter", "-t", str(pid)] + ns_args + args.command
+        run_cmd(cmd, dry_run=args.dry_run)
+    else:
+        if args.as_user:
+            cmd = ["nsenter", "-t", str(pid), ] + ns_args + ["sudo", "-u", user] + args.command
+        else:
+            cmd = ["nsenter", "-t", str(pid), ] + ns_args + args.command
+        run_cmd_sudo(cmd, dry_run=args.dry_run)
+
 
 def port_forward_add(args):
     ns_name = args.ns_name
@@ -956,11 +994,11 @@ def main():
 
     # exec command
     parser_exec = subparsers.add_parser("exec", help="Execute a command inside a network namespace")
+    add_dry_run(parser_exec)
+    parser_exec.add_argument('--as-user', help="Use sudo -u to execute the command as your user inside the namespace")
     parser_exec.add_argument("ns_name", help=ns_name_help)
     parser_exec.add_argument("command", nargs=argparse.REMAINDER, help="Command to execute")
-    add_dry_run(parser_exec)
-    #parser_exec.set_defaults(func=exec_in_namespace)
-    parser_exec.set_defaults(func=currently_not_implemented)
+    parser_exec.set_defaults(func=exec_in_namespace)
 
     # port-forward command
     parser_port_forward = subparsers.add_parser("port-forward", help="Utilities for forwarding a port between host and namespace")
