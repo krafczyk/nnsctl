@@ -166,6 +166,73 @@ def run_cmd_sudo(*args, **kwargs):
     return run_cmd(*args, try_sudo=True, **kwargs)
 
 
+def run_in_namespace(
+        pid: int,
+        command: list[str],
+        *,
+        net: bool = False,
+        mount: bool = False,
+        pid_ns: bool = False,
+        ipc: bool = False,
+        uts: bool = False,
+        user_ns: bool = False,
+        cgroup: bool = False,
+        time_ns: bool = False,
+        namespaces: Namespaces|None = None,
+        as_user: str|None = None,
+        dry_run: bool = False,
+        working_dir: str|None = None,
+    ) -> subprocess.CompletedProcess[str] | None:
+    """
+    Execute `command` inside the namespaces of the given `pid` via nsenter.
+    
+    Flags correspond to the nsenter options:
+      net, mount, pid_ns, ipc, uts, user_ns, cgroup, time_ns.
+    If `as_user` is provided (e.g. "matthew"), we ssh-u to that UID/GID
+    inside the namespace (requires sudo). Otherwise, if you're root it'll
+    just call nsenter directly.
+    """
+    # 1) build the list of nsenter flags
+    ns_args: list[str] = []
+    if namespaces is not None:
+        net = namespaces.net or net
+        mount = namespaces.mount or mount
+        pid_ns = namespaces.pid or pid_ns
+        ipc = namespaces.ipc or ipc
+        uts = namespaces.uts or uts
+        user_ns = namespaces.user or user_ns
+        cgroup = namespaces.cgroup or cgroup
+        time_ns = namespaces.time or time_ns
+ 
+    if net:       ns_args.append("--net")
+    if mount:     ns_args.append("--mount")
+    if pid_ns:    ns_args.append("--pid")
+    if ipc:       ns_args.append("--ipc")
+    if uts:       ns_args.append("--uts")
+    if user_ns:   ns_args.append("--user")
+    if cgroup:    ns_args.append("--cgroup")
+    if time_ns:   ns_args.append("--time")
+    if working_dir:
+        ns_args.append(f"--wd={working_dir}")
+
+    base = ["nsenter", "-t", str(pid)] + ns_args
+
+    # 2) if we're root, just run it
+    if os.geteuid() == 0:
+        cmd = base + command
+        return run_cmd(cmd, dry_run=dry_run)
+
+    # 3) otherwise wrap in sudo
+    sudo_cmd = base.copy()
+    if as_user:
+        # resolve uid/gid
+        uid = run_cmd(["id", "-u", as_user], capture_output=True).stdout.strip()
+        gid = run_cmd(["id", "-g", as_user], capture_output=True).stdout.strip()
+        sudo_cmd += [f"--setuid={uid}", f"--setgid={gid}"]
+    sudo_cmd += ["--"] + command
+    return run_cmd_sudo(sudo_cmd, dry_run=dry_run)
+
+
 def get_active_ip_iface() -> tuple[str, str]:
     """
     Get the active (non-loopback) interface and its IP.
@@ -784,51 +851,23 @@ def exec_in_namespace(args):
     import getpass
     user = getpass.getuser()
 
-    ns_name = args.ns_name
-
     if not args.command:
         print("No command specified for exec.")
         sys.exit(1)
 
-    ns_config = load_namespace_config(ns_name)
+    # only pass a real as_user if they explicitly asked for one
+    as_user = None if args.as_user == "nobody" else args.as_user
+
+    ns_config = load_namespace_config(args.ns_name)
     validate_ns_config(ns_config)
 
-    pid = ns_config.pid
-
-    ns_args = []
-    if ns_config.namespaces.net:
-        ns_args.append("--net")
-    if ns_config.namespaces.mount:
-        ns_args.append("--mount")
-    if ns_config.namespaces.pid:
-        ns_args.append("--pid")
-    if ns_config.namespaces.ipc:
-        ns_args.append("--ipc")
-    if ns_config.namespaces.uts:
-        ns_args.append("--uts")
-    if ns_config.namespaces.user:
-        ns_args.extend(["--user"])
-    if ns_config.namespaces.cgroup:
-        ns_args.append("--cgroup")
-    if ns_config.namespaces.time:
-        ns_args.append("--time")
-
-    # Add working directory
-    ns_args.append(f"--wd={os.getcwd()}")
-
-    # Check if we're the root user
-    if os.geteuid() == 0:
-        # We're root, so we can use nsenter directly
-        cmd = ["nsenter", "-t", str(pid)] + ns_args + args.command
-        run_cmd(cmd, dry_run=args.dry_run)
-    else:
-        if args.as_user:
-            uid = str(run_cmd(f"id -u {user}", capture_output=True).stdout.strip())
-            gid = str(run_cmd(f"id -g {user}", capture_output=True).stdout.strip())
-            cmd = ["nsenter", "-t", str(pid), ] + ns_args + [f"--setuid={uid}", f"--setgid={gid}"] + ["--"] + args.command
-        else:
-            cmd = ["nsenter", "-t", str(pid), ] + ns_args + ["--"] + args.command
-        run_cmd_sudo(cmd, dry_run=args.dry_run)
+    run_in_namespace(
+        pid=ns_config.pid,
+        command=args.command,
+        namespaces=ns_config.namespaces,
+        as_user=as_user,
+        dry_run=args.dry_run,
+        working_dir=os.getcwd())
 
 
 def port_forward_add(args):
@@ -1003,7 +1042,7 @@ def main():
     # exec command
     parser_exec = subparsers.add_parser("exec", help="Execute a command inside a network namespace")
     add_dry_run(parser_exec)
-    parser_exec.add_argument('--as-user', help="Use sudo -u to execute the command as your user inside the namespace", action='store_true')
+    parser_exec.add_argument('--as-user', help="Use sudo -u to execute the command as your user inside the namespace", default="nobody")
     parser_exec.add_argument("ns_name", help=ns_name_help)
     parser_exec.add_argument("command", nargs=argparse.REMAINDER, help="Command to execute")
     parser_exec.set_defaults(func=exec_in_namespace)
