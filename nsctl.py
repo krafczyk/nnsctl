@@ -260,7 +260,7 @@ def run_in_namespace(
         uid = run_cmd(["id", "-u", as_user], capture_output=True).stdout.strip()
         gid = run_cmd(["id", "-g", as_user], capture_output=True).stdout.strip()
         sudo_cmd += [f"--setuid={uid}", f"--setgid={gid}"]
-    sudo_cmd += ["--"] + command
+    sudo_cmd += ["--"] + cmd
     return run_cmd_sudo(sudo_cmd, dry_run=dry_run)
 
 
@@ -417,6 +417,21 @@ def net_add_macvlan(args: NetAddMacvlanArgs):
     #     ns_config,
     #     "dhclient "
     #         )
+
+
+@dataclass
+class NetRemoveMacvlanArgs(NSArgs):
+    dev: Annotated[str, Arg("--dev", help="Name of device to use. Otherwise it will be macvlan0", default="mavlan0")]
+
+
+def net_remove_macvlan(args: NetRemoveMacvlanArgs):
+    ns_name = args.ns_name
+    # Load the namespace configuration
+    ns_config = load_namespace_config(ns_name)
+    # Remove the macvlan interface
+    macvlan_name = args.dev
+    # Destroy the macvlan interface on the host
+    _ = run_cmd_sudo(f"ip netns exec {ns_config.name} ip link del {macvlan_name}")
 
 
 @dataclass
@@ -897,6 +912,10 @@ def destroy_namespace(args: DestroyNSArgs):
     ns_config = load_namespace_config(ns_name)
     print(f"Destroying network namespace {ns_name}")
 
+    if ns_config.namespaces.net:
+        # Remove the network namespace links
+        net_remove(NSRemoveArgs(ns_name=ns_config.name, dry_run=False))
+
     print(f"Seeing if there are still processes in the namespace {ns_name}")
     owner_pid = ns_config.pid
 
@@ -1186,6 +1205,13 @@ def main():
     parser_net_add_macvlan = subparsers_net_add.add_parser("macvlan", help="Add a macvlan component to the network namespace.")
     AddDataclassArguments(parser_net_add_macvlan, NetAddMacvlanArgs)
     parser_net_add_macvlan.set_defaults(func=net_add_macvlan, arg_cls=NetAddMacvlanArgs)
+
+    # net del command
+    parser_net_del = subparsers_net.add_parser("del", help="Remove a networking component")
+    subparsers_net_del = parser_net_del.add_subparsers(dest="subsubcommand", required=True)
+
+    parser_net_del_macvlan = subparsers_net_del.add_parser("macvlan", help="Remove a macvlan component from the network namespace.")
+    parser_net_del_macvlan.set_defaults()
 
     ### port-forward command
     ##parser_port_forward = subparsers.add_parser("port-forward", help="Utilities for forwarding a port between host and namespace")
