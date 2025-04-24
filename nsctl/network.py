@@ -1,5 +1,6 @@
 import sys
-from nsctl.proesses import run_cmd
+import os
+from nsctl.processes import run_cmd, run_cmd_sudo
 
 
 def get_active_ip_iface() -> tuple[str, str]:
@@ -25,7 +26,10 @@ def get_active_ip_iface() -> tuple[str, str]:
 
 def scrub_routes(subnet: str):
     print("Checking host routes...")
-    routes = run_cmd("ip route show", capture_output=True).stdout
+    result = run_cmd("ip route show", capture_output=True)
+    if result is None:
+        raise RuntimeError("No result from command")
+    routes = result.stdout
     subnet_triplet = '.'.join(subnet.split('.')[:3])
     print(f"scrub triplet: {subnet_triplet}")
     if not routes:
@@ -43,7 +47,10 @@ def scrub_iptables_rules(subnet: str, iface: str):
     print("Checking iptables NAT rules...")
     subnet_triplet = '.'.join(subnet.split('.')[:3])
     print(f"scrub triplet: {subnet_triplet}")
-    rules = run_cmd_sudo(["iptables", "-t", "nat", "-S"], capture_output=True).stdout
+    result = run_cmd_sudo(["iptables", "-t", "nat", "-S"], capture_output=True)
+    if result is None:
+        raise RuntimeError("No result from command")
+    rules = result.stdout
     if rules:
         for rule in rules.splitlines():
             # Check if the rule contains our problematic subnet
@@ -56,7 +63,10 @@ def scrub_iptables_rules(subnet: str, iface: str):
                     _ = run_cmd_sudo(cmd)
 
     print("Checking iptables routing rules...")
-    rules = run_cmd_sudo(["iptables", "-S"], capture_output=True).stdout
+    result = run_cmd_sudo(["iptables", "-S"], capture_output=True)
+    if result is None:
+        raise RuntimeError("No result from command")
+    rules = result.stdout
     if rules:
         for rule in rules.splitlines():
             # Check if the rule contains our problematic subnet

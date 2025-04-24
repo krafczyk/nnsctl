@@ -1,8 +1,21 @@
+import os
+import sys
+import subprocess
+import time
+import psutil
+import argparse
+import shutil
+from pprint import pprint
 from dataclasses import dataclass
 from typing import Annotated
-from autoparser import Arg
-from nsctl.config import load_namespace_config
-from nsctl.processes import run_in_namespace, run_cmd, run_cmd_sudo
+from autoparser import Arg, AddDataclassArguments
+from nsctl.config import load_namespace_config, ns_config_base_path, \
+    save_namespace_config, Namespaces, NSInfo
+from nsctl.processes import run_in_namespace, run_cmd_sudo, \
+    find_bottom_children, process_exists
+from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
+    disable_ip_forwarding, disable_route_localnet
+from nsctl import VERSION
 
 
 @dataclass
@@ -744,7 +757,6 @@ def main():
     parser: argparse.ArgumentParser = argparse.ArgumentParser(prog="nsctl", description="Namespace group control tool")
     _ = parser.add_argument("--version", action="version", version=f"nsctl {VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    ns_name_help = "Name of the namespace group"
 
     # list command
     parser_list = subparsers.add_parser("list", help="List namespace groups managed by nsctl")
