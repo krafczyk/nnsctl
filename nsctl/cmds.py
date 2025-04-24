@@ -8,7 +8,7 @@ import shutil
 from pprint import pprint
 from dataclasses import dataclass
 from typing import Annotated
-from autoparser import Arg, AddDataclassArguments
+from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
 from nsctl.processes import run_in_namespace, run_cmd_sudo, \
