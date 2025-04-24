@@ -7,8 +7,8 @@ import argparse
 import shutil
 from pprint import pprint
 from dataclasses import dataclass
-from typing import Annotated
-from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass
+from typing import Annotated, cast
+from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass, DataclassType, Handler
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
 from nsctl.processes import run_in_namespace, run_cmd_sudo, \
@@ -859,7 +859,8 @@ def main():
 
     args: argparse.Namespace = parser.parse_args()
     if hasattr(args, 'arg_cls'):
-        func: Callable[Handler,None] = args.func
-        func(NamespaceToDataclass(args, args.arg_cls))
+        cls = cast(type[DataclassType], args.arg_cls)
+        func = cast(Handler[DataclassType],args.func)
+        func(NamespaceToDataclass(args, cls))
     else:
-        args.func(args)
+        args.func(args) # pyright: ignore[reportAny]
