@@ -1,5 +1,6 @@
 from enum import IntEnum, unique
 import os
+from nsctl.config import Namespaces
 
 
 # Classes for managing privileges
@@ -50,18 +51,42 @@ class Capabilities:
 
 # Required capabilities for each namespace operation
 REQUIRED = {
-    "netns":  [Capability.CAP_NET_ADMIN, Capability.CAP_SYS_ADMIN],
-    "mntns":  [Capability.CAP_SYS_ADMIN],
-    "pidns":  [Capability.CAP_SYS_ADMIN],
+    "net":  [Capability.CAP_NET_ADMIN, Capability.CAP_SYS_ADMIN],
+    "mnt":  [Capability.CAP_SYS_ADMIN],
+    "pid":  [Capability.CAP_SYS_ADMIN],
 }
 
 
-def check_ops(ops: list[str]) -> bool:
+def check_ops(ops: list[str] | Namespaces, which: str = "effective") -> bool:
+    """
+    which ∈ {'inheritable','permitted','effective'}
+    """
     caps = Capabilities()
     if os.geteuid() == 0:
         return True
+
+    if isinstance(ops, Namespaces):
+        ns = ops
+        ops: list[str] = []
+        if ns.net:
+            ops.append("net")
+        if ns.mount:
+            ops.append("mnt")
+        if ns.pid:
+            ops.append("pid")
+
     for op in ops:
         for req in REQUIRED[op]:
-            if not caps.has(req):
+            if not caps.has(req, which=which):
                 return False
     return True
+
+
+def get_uid(user: str) -> int:
+    import pwd
+    return pwd.getpwnam(user).pw_uid
+
+
+def get_gid(user: str) -> int:
+    import pwd
+    return pwd.getpwnam(user).pw_gid
