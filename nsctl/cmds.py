@@ -11,8 +11,9 @@ from typing import Annotated, cast
 from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass, DataclassType, Handler
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
-from nsctl.processes import run_in_namespace, run_cmd_sudo, \
+from nsctl.processes import run_check, run_in_namespace, run_cmd_sudo, \
     find_bottom_children, process_exists
+from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
     disable_ip_forwarding, disable_route_localnet
 from nsctl import VERSION
@@ -35,17 +36,17 @@ def net_init(args: NSInitArgs):
     ns_config = load_namespace_config(args.ns_name)
 
     # Activate loopback device
-    _ = run_in_namespace(
-        ns_config.pid,
+    run_check(
         "ip set up lo",
-        namespaces=ns_config.namespaces,
+        ns=ns_config,
         dry_run=args.dry_run,
     )
 
     # create named net ns
-    _ = run_cmd_sudo(
+    run_check(
         f"ip netns add {ns_config.name} /proc/{ns_config.pid}/ns/net",
-        dry_run=args.dry_run
+        escalate="sudo",
+        dry_run=args.dry_run,
     )
 
 
@@ -58,8 +59,9 @@ def net_remove(args: NSRemoveArgs):
     ns_config = load_namespace_config(args.ns_name)
 
     # destroy named net ns
-    _ = run_cmd_sudo(
+    run_check(
         f"ip netns del {ns_config.name}",
+        escalate="sudo",
         dry_run=args.dry_run,
     )
 
@@ -151,8 +153,6 @@ def create_namespace(args: CreateNSArgs) -> None:
     cgroup = args.cgroup
     time_ns = args.time
 
-    sudo = args.sudo
-   
     if args.all:
         net = True
         mount = True
@@ -162,6 +162,17 @@ def create_namespace(args: CreateNSArgs) -> None:
         user = True
         cgroup = True
         time_ns = True
+
+    ns = Namespaces(
+        net=net,
+        mount=mount,
+        pid=pid,
+        ipc=ipc,
+        uts=uts,
+        user=user,
+        cgroup=cgroup,
+        time=time_ns,
+    )
 
     # Check if the namespace already exists
     if os.path.exists(f"{ns_config_base_path}/{ns_name}"):
@@ -189,8 +200,8 @@ def create_namespace(args: CreateNSArgs) -> None:
 
     cmd += [ "--fork", "sleep", "infinity" ]
 
-    if sudo:
-        cmd = ["sudo"] + cmd
+    if not check_ops(ns):
+        cmd = ["sudo", "-n"] + cmd
 
     if args.dry_run:
         print("Would try to create a namespace with the following command:")
@@ -235,16 +246,7 @@ def create_namespace(args: CreateNSArgs) -> None:
     config = NSInfo(
         name=ns_name,
         pid=sleeper_pid,
-        namespaces=Namespaces(
-            net=net,
-            mount=mount,
-            pid=pid,
-            ipc=ipc,
-            uts=uts,
-            user=user,
-            cgroup=cgroup,
-            time=time_ns,
-        )
+        namespaces=ns
     )
 
     # Write configuration to file

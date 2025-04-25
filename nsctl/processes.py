@@ -4,8 +4,11 @@ import psutil
 from collections.abc import Mapping
 from typing import cast, Any, Literal
 
-from nsctl.config import Namespaces
-from nsctl.utils import get_uid, get_gid
+from nsctl.config import NSInfo, Namespaces
+from nsctl.utils import get_uid, get_gid, check_ops
+
+
+Escalate = Literal["sudo", "pkexec", None]
 
 
 def _exec_cmd(cmd: list[str] | str,
@@ -20,7 +23,7 @@ def _exec_cmd(cmd: list[str] | str,
               ns_pid: int | None = None,
               working_dir: str | None = None,
               # privilege
-              escalate: Literal["sudo", "pkexec", None] = None,
+              escalate: Escalate = None,
               as_user: str | None = None
               ) -> subprocess.CompletedProcess[str] | subprocess.Popen[str] | None:
     """
@@ -80,6 +83,33 @@ def _exec_cmd(cmd: list[str] | str,
         capture_output=capture_output,
         env=env,
         check=check
+    )
+
+def run_check(cmd: list[str] | str,
+              *,
+              dry_run: bool = False,
+              env: Mapping[str, str] | None = None,
+              escalate: Escalate = None,
+              ns: NSInfo|None = None,
+              as_user: str|None = None,) -> None:
+    work_dir = os.getcwd()
+    ns_pid = None
+    escalate = None
+    if ns is not None:
+        ns_pid = ns.pid
+        if not check_ops(ns.namespaces):
+            escalate = "sudo"
+
+    _ = _exec_cmd(
+        cmd,
+        capture_output=False,
+        check=True,
+        env=env,
+        escalate=escalate,
+        dry_run=dry_run,
+        ns_pid=ns_pid,
+        as_user=as_user,
+        working_dir=work_dir,
     )
 
 
