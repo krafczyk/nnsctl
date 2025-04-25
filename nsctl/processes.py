@@ -1,9 +1,86 @@
 import sys
-import os
-import subprocess
+import os, shlex, subprocess, shutil
 import psutil
+from collections.abc import Mapping
+from typing import cast, Any, Literal
+
 from nsctl.config import Namespaces
-from typing import cast, Any
+from nsctl.utils import get_uid, get_gid
+
+
+def _exec_cmd(cmd: list[str] | str,
+              *,
+              # orthogonal switches
+              detach: bool = False,
+              capture_output: bool = False,
+              check: bool = False,
+              dry_run: bool = False,
+              env: Mapping[str, str] | None = None,
+              # namespace
+              ns_pid: int | None = None,
+              working_dir: str | None = None,
+              # privilege
+              escalate: Literal["sudo", "pkexec", None] = None,
+              as_user: str | None = None
+              ) -> subprocess.CompletedProcess[str] | subprocess.Popen[str] | None:
+    """
+    Bottom level executor
+    * `detach=True` -> returns immediately with `popen` handle; `capture_output`
+                       must be false
+    * `ns_pid`      -> if provided, prepends `nsenter -t <pid> --all --`.
+    * `escalate`    -> prepend `sudo -n` or `pkexec` **once**, *before* nsenter.
+    * `as_user`     -> translate to `--setuid/--setgid` when using nsenter.
+    """
+
+    # ----------------------- validate --------------------------
+    if detach and capture_output:
+        raise ValueError("Cannot use detach=True with capture_output=True.")
+    if isinstance(cmd, str):
+        cmd_args: list[str] = shlex.split(cmd)
+    else:
+        cmd_args = list(cmd)
+
+    # ----------------------- nsenter --------------------------
+    if ns_pid is not None:
+        ns_cmd = ["nsenter", "-t", str(ns_pid), "--all"]
+        if working_dir:
+            ns_cmd.append(f"--wd={working_dir}")
+        if as_user:
+            uid = get_uid(as_user)
+            gid = get_gid(as_user)
+            ns_cmd += [f"--setuid={uid}", f"--setgid={gid}"]
+        ns_cmd.append("--")
+        cmd_args = ns_cmd + cmd_args
+
+    # ----------------------- escalate --------------------------
+    if escalate is not None:
+        helper = shutil.which(escalate)
+        if helper is None:
+            raise RuntimeError(f"{escalate} not found in PATH; cannot escalate")
+        cmd_args = [helper, "-n"] + cmd_args
+
+    # ----------------------- dry-run --------------------------
+    if dry_run:
+        print("DRY-RUN:", " ".join(cmd_args))
+        return None
+
+    # ----------------------- execution path --------------------------
+    if detach:
+        return subprocess.Popen(
+            cmd_args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+            text=True,
+        )
+    return subprocess.run(
+        cmd_args,
+        text=True,
+        capture_output=capture_output,
+        env=env,
+        check=check
+    )
 
 
 def run_cmd(cmd: list[str] | str,
