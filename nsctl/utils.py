@@ -65,17 +65,19 @@ def check_ops(ops: list[str] | Namespaces, which: str = "effective") -> bool:
     if os.geteuid() == 0:
         return True
 
-    if isinstance(ops, Namespaces):
-        ns = ops
-        ops: list[str] = []
-        if ns.net:
-            ops.append("net")
-        if ns.mount:
-            ops.append("mnt")
-        if ns.pid:
-            ops.append("pid")
+    ops_l: list[str] = []
 
-    for op in ops:
+    if isinstance(ops, Namespaces):
+        if ops.net:
+            ops_l.append("net")
+        if ops.mount:
+            ops_l.append("mnt")
+        if ops.pid:
+            ops_l.append("pid")
+    else:
+        ops_l = ops
+
+    for op in ops_l:
         for req in REQUIRED[op]:
             if not caps.has(req, which=which):
                 return False
