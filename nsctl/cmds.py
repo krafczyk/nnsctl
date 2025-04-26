@@ -11,7 +11,7 @@ from typing import Annotated, cast
 from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass, DataclassType, Handler
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
-from nsctl.processes import run_check, run_in_namespace, run_cmd_sudo, \
+from nsctl.processes import run_check, run_in_namespace, \
     find_bottom_children, process_exists, run_check_output
 from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
@@ -104,10 +104,14 @@ def net_add_macvlan(args: NetAddMacvlanArgs):
     macvlan_name = args.dev
 
     # Create the macvlan interface on the host
-    _ = run_cmd_sudo(f"ip link add link {host_iface} name {macvlan_name} type macvlan mode bridge")
+    run_check(
+        f"ip link add link {host_iface} name {macvlan_name} type macvlan mode bridge",
+        escalate="sudo")
 
     # Assign it to the net namespace
-    _ = run_cmd_sudo(f"ip link set {macvlan_name} netns {ns_config.name}")
+    run_check(
+        f"ip link set {macvlan_name} netns {ns_config.name}",
+        escalate="sudo")
 
     # # Use dhclient to get an IP address
     # # TODO: Make this more cross-platform
@@ -139,7 +143,9 @@ def net_remove_macvlan(args: NetRemoveMacvlanArgs):
     # Remove the macvlan interface
     macvlan_name = args.dev
     # Destroy the macvlan interface on the host
-    _ = run_cmd_sudo(f"ip netns exec {ns_config.name} ip link del {macvlan_name}")
+    run_check(
+        f"ip netns exec {ns_config.name} ip link del {macvlan_name}",
+        escalate="sudo")
 
 
 @dataclass
