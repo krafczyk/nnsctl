@@ -778,13 +778,15 @@ def exec_in_namespace(args: ExecArgs):
 
 
 def list_namespaces(_: argparse.Namespace):
-    print("Listing Namespace groups managed by nsctl:")
     # We list namespaces that have a configuration file under ns_config_base_path.
     if os.path.exists(ns_config_base_path):
-        for ns in os.listdir(ns_config_base_path):
-            print(ns)
-    else:
-        print("No namespaces groups found.")
+        namespaces = os.listdir(ns_config_base_path)
+        if namespaces:
+            print("Listing Namespace groups managed by nsctl:")
+            for ns in namespaces:
+                print(ns)
+            return
+    print("No namespaces groups found.")
 
 
 def currently_not_implemented(_: argparse.Namespace):
