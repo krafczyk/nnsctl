@@ -11,8 +11,8 @@ from typing import Annotated, cast
 from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass, DataclassType, Handler
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
-from nsctl.processes import run_check, run_in_namespace, \
-    find_bottom_children, process_exists, run_check_output
+from nsctl.processes import run, run_check, run_check_output, \
+    find_bottom_children, process_exists
 from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
     disable_ip_forwarding, disable_route_localnet
@@ -668,13 +668,11 @@ def exec_in_namespace(args: ExecArgs):
 
     ns_config = load_namespace_config(args.ns_name)
 
-    _ = run_in_namespace(
-        pid=ns_config.pid,
-        command=args.command,
-        namespaces=ns_config.namespaces,
+    run(
+        args.command,
+        ns=ns_config,
         as_user=as_user,
-        dry_run=args.dry_run,
-        working_dir=os.getcwd())
+        dry_run=args.dry_run)
 
 
 #def port_forward_add(args):
