@@ -12,7 +12,7 @@ from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass, Datacla
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
 from nsctl.processes import run_check, run_in_namespace, run_cmd_sudo, \
-    find_bottom_children, process_exists
+    find_bottom_children, process_exists, run_check_output, run_check_code
 from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
     disable_ip_forwarding, disable_route_localnet
@@ -57,6 +57,15 @@ class NSRemoveArgs(NSArgs, DryRunArgs):
 
 def net_remove(args: NSRemoveArgs):
     ns_config = load_namespace_config(args.ns_name)
+
+    # Check if the namespace is already removed
+    netns_list = run_check_output(
+        "ip netns list",
+    )
+
+    if netns_list is None or ns_config.name not in netns_list:
+        print(f"Namespace {ns_config.name} already removed.")
+        return
 
     # destroy named net ns
     run_check(
@@ -178,7 +187,7 @@ def create_namespace(args: CreateNSArgs) -> None:
     if os.path.exists(f"{ns_config_base_path}/{ns_name}"):
         print(f"Namespace {ns_name} already exists.")
         sys.exit(1)
-    
+
     # Create the namespaces using unshare
     cmd = [ "unshare" ]
     if net:
@@ -509,13 +518,20 @@ def ps(args: PSArgs):
 
 
 @dataclass
-class DestroyNSArgs(NSArgs):
+class DestroyNSArgs(NSArgs, DryRunArgs):
     force: Annotated[bool, Arg(help="Force kill running processes in the namespace")]
+    sudo: Annotated[bool, Arg(help="Use sudo to kill processes.")]
 
 
 def destroy_namespace(args: DestroyNSArgs):
     ns_name = args.ns_name
     force = args.force
+    escalate: str|None
+
+    if args.sudo:
+        escalate = "sudo"
+    else:
+        escalate = None
 
     # Get the namespace configuration
     ns_config = load_namespace_config(ns_name)
@@ -523,13 +539,17 @@ def destroy_namespace(args: DestroyNSArgs):
 
     if ns_config.namespaces.net:
         # Remove the network namespace links
-        net_remove(NSRemoveArgs(ns_name=ns_config.name, dry_run=False))
+        net_remove(NSRemoveArgs(ns_name=ns_config.name, dry_run=args.dry_run))
 
     print(f"Seeing if there are still processes in the namespace {ns_name}")
     owner_pid = ns_config.pid
 
     namespaced_pids = get_namespaced_pids(owner_pid)
     pids = [ p for p in namespaced_pids if p != owner_pid ]
+
+    def prune_processes(pids: list[int]) -> list[int]:
+        """Prune processes that are no longer running"""
+        return [p for p in pids if process_exists(p)]
 
     if pids and not force:
         print("The following processes are still running in the namespace:")
@@ -540,19 +560,25 @@ def destroy_namespace(args: DestroyNSArgs):
 
     elif pids and force:
         print("Killing processes in the namespace:")
-        for pid in pids:
-            print(f"Killing PID {pid}")
-            _ = run_cmd_sudo(["kill", "-TERM", str(pid)])
+        run_check(["kill", "-TERM"]+list(map(str, pids)), escalate=escalate, dry_run=args.dry_run)
         time.sleep(5)
-        for pid in pids:
-            if process_exists(pid):
-                _ = run_cmd_sudo(["kill", "-KILL", str(pid)])
+        pids = prune_processes(pids)
+        if pids:
+            run_check(["kill", "-KILL"]+list(map(str,pids)), escalate=escalate, dry_run=args.dry_run)
+        time.sleep(5)
+        pids = prune_processes(pids)
+        if pids:
+            raise RuntimeError(f"Failed to kill processes in namespace {ns_name}. Some processes are still running: {pids}")
 
     if process_exists(owner_pid):
         # Delete the namespace
-        _ = run_cmd_sudo(["kill", "-TERM", str(owner_pid)])
+        run_check(["kill", "-TERM", str(owner_pid)], escalate=escalate, dry_run=args.dry_run)
         time.sleep(5)
-        _ = run_cmd_sudo(["kill", "-KILL", str(owner_pid)])
+        if process_exists(owner_pid):
+            run_check(["kill", "-KILL", str(owner_pid)], escalate=escalate, dry_run=args.dry_run)
+        time.sleep(5)
+        if process_exists(owner_pid):
+            raise RuntimeError(f"Failed to kill the namespace process {owner_pid}. It is still running.")
         print(f"Namespace {ns_name} destroyed.")
 
     # # Remove the DNS configuration for the namespace
