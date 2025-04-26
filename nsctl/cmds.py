@@ -12,7 +12,7 @@ from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass, Datacla
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
 from nsctl.processes import run, run_check, run_check_output, \
-    find_bottom_children, process_exists
+    find_bottom_children, process_exists, detach_and_check
 from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
     disable_ip_forwarding, disable_route_localnet
@@ -221,32 +221,12 @@ def create_namespace(args: CreateNSArgs) -> None:
 
     cmd += [ "--fork", "sleep", "infinity" ]
 
-    if not check_ops(ns):
-        cmd = ["sudo", "-n"] + cmd
-
-    if args.dry_run:
-        print("Would try to create a namespace with the following command:")
-        print(" ".join(cmd))
-        return
-
-    # TODO: Make this more cross-platform
-    process = subprocess.Popen(
+    process = detach_and_check(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        start_new_session=True, # Create a new session, detaching the process
+        escalate="sudo" if not check_ops(ns) else None,
+        dry_run=args.dry_run,
+        wait_time=1,
     )
-
-    # Wait for the process to start, and check that it didn't fail
-    time.sleep(1)
-    if process.poll() is not None:
-        if process.stdout is None:
-            raise RuntimeError("unshare failed: stdout is None")
-        output = process.stdout.read().decode(encoding='utf-8')
-        if "unshare failed: Operation not permitted" in output:
-            raise RuntimeError("unshare failed: Operation not permitted. This may be due to missing capabilities.")
-        else:
-            raise RuntimeError(f"Failed to create namespace with unshare. It unexpectedly exited. Ouptut was:\n{output}")
 
     # Find the bottom-most children of the unshare process
     unshare_pid = process.pid
