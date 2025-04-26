@@ -1,6 +1,6 @@
-import sys
 import os
-from nsctl.processes import run_cmd, run_cmd_sudo
+from subprocess import CalledProcessError
+from nsctl.processes import run_check_output, run_check
 
 
 def get_active_ip_iface() -> tuple[str, str]:
@@ -9,27 +9,20 @@ def get_active_ip_iface() -> tuple[str, str]:
     Uses 'ip route get 8.8.8.8' to determine the primary interface.
     """
     try:
-        result = run_cmd("ip route get 8.8.8.8", capture_output=True)
-        if result is None:
-            raise RuntimeError("No result from command")
-        route_out = result.stdout
+        route_out = run_check_output("ip route get 8.8.8.8")
         # Example output: "8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.100 ..."
         tokens = route_out.split()
         iface = tokens[tokens.index("dev") + 1]
         src_index = tokens.index("src") + 1
         ip_addr = tokens[src_index]
         return iface, ip_addr
-    except Exception:
-        print("No active non-loopback interface found.")
-        sys.exit(1)
+    except CalledProcessError as e:
+        raise RuntimeError(f"No active non-loopback interface found. {e}")
 
 
 def scrub_routes(subnet: str):
     print("Checking host routes...")
-    result = run_cmd("ip route show", capture_output=True)
-    if result is None:
-        raise RuntimeError("No result from command")
-    routes = result.stdout
+    routes = run_check_output("ip route show")
     subnet_triplet = '.'.join(subnet.split('.')[:3])
     print(f"scrub triplet: {subnet_triplet}")
     if not routes:
@@ -40,17 +33,14 @@ def scrub_routes(subnet: str):
             print(f"Removing route: {line}")
             # Remove the route by reusing the route specification.
             # This may fail if additional fields cause mismatches, so you might need to adjust the parsing.
-            _ = run_cmd_sudo(["ip", "route", "del"] + line.split())
+            run_check(["ip", "route", "del"] + line.split(), escalate="sudo")
 
 
 def scrub_iptables_rules(subnet: str, iface: str):
     print("Checking iptables NAT rules...")
     subnet_triplet = '.'.join(subnet.split('.')[:3])
     print(f"scrub triplet: {subnet_triplet}")
-    result = run_cmd_sudo(["iptables", "-t", "nat", "-S"], capture_output=True)
-    if result is None:
-        raise RuntimeError("No result from command")
-    rules = result.stdout
+    rules = run_check_output(["iptables", "-t", "nat", "-S"], escalate="sudo")
     if rules:
         for rule in rules.splitlines():
             # Check if the rule contains our problematic subnet
@@ -60,13 +50,10 @@ def scrub_iptables_rules(subnet: str, iface: str):
                     delete_rule = rule.replace("-A", "-D", 1)
                     cmd = ["iptables", "-t", "nat"] + delete_rule.split()
                     print(f"Deleting iptables NAT rule: {delete_rule}")
-                    _ = run_cmd_sudo(cmd)
+                    run_check(cmd, escalate="sudo")
 
     print("Checking iptables routing rules...")
-    result = run_cmd_sudo(["iptables", "-S"], capture_output=True)
-    if result is None:
-        raise RuntimeError("No result from command")
-    rules = result.stdout
+    rules = run_check_output(["iptables", "-S"], escalate="sudo")
     if rules:
         for rule in rules.splitlines():
             # Check if the rule contains our problematic subnet
@@ -76,7 +63,7 @@ def scrub_iptables_rules(subnet: str, iface: str):
                     delete_rule = rule.replace("-A", "-D", 1)
                     cmd = ["iptables" ] + delete_rule.split()
                     print(f"Deleting iptables routing rule: {delete_rule}")
-                    _ = run_cmd_sudo(cmd)
+                    run_check(cmd, escalate="sudo")
 
 
 def is_ip_forwarding_enabled() -> bool:
@@ -88,22 +75,39 @@ def is_ip_forwarding_enabled() -> bool:
 
 def enable_route_localnet(iface: str, ns_name: str|None=None, dry_run:bool=False):
     if ns_name is None:
-        _ = run_cmd_sudo(f"sysctl -w net.ipv4.conf.{iface}.route_localnet=1", dry_run=dry_run)
+        run_check(
+            f"sysctl -w net.ipv4.conf.{iface}.route_localnet=1",
+            dry_run=dry_run,
+            escalate="sudo")
     else:
-        _ = run_cmd_sudo(f"ip netns exec {ns_name} sysctl -w net.ipv4.conf.{iface}.route_localnet=1", dry_run=dry_run)
+        run_check(
+            f"ip netns exec {ns_name} sysctl -w net.ipv4.conf.{iface}.route_localnet=1",
+            dry_run=dry_run,
+            escalate="sudo")
 
 
 def disable_route_localnet(iface: str , ns_name: str|None=None, dry_run:bool=False):
     if ns_name is None:
-        _ = run_cmd_sudo(f"sysctl -w net.ipv4.conf.{iface}.route_localnet=0", dry_run=dry_run)
+        run_check(
+            f"sysctl -w net.ipv4.conf.{iface}.route_localnet=0",
+            dry_run=dry_run,
+            escalate="sudo")
     else:
-        _ = run_cmd_sudo(f"ip netns exec {ns_name} sysctl -w net.ipv4.conf.{iface}.route_localnet=0", dry_run=dry_run)
+        run_check(
+            f"ip netns exec {ns_name} sysctl -w net.ipv4.conf.{iface}.route_localnet=0",
+            dry_run=dry_run,
+            escalate="sudo")
 
 
 def enable_ip_forwarding(dry_run:bool=False):
-    _ = run_cmd_sudo("sysctl -w net.ipv4.ip_forward=1", dry_run=dry_run)
+    run_check(
+        "sysctl -w net.ipv4.ip_forward=1",
+        dry_run=dry_run,
+        escalate="sudo")
 
 
 def disable_ip_forwarding(dry_run:bool=False):
-    _ = run_cmd_sudo("sysctl -w net.ipv4.ip_forward=0", dry_run=dry_run)
-
+    run_check(
+        "sysctl -w net.ipv4.ip_forward=0",
+        dry_run=dry_run,
+        escalate="sudo")
