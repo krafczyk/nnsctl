@@ -28,11 +28,11 @@ class DryRunArgs:
     dry_run: Annotated[bool, Arg("--dry-run", help="If passed report the commands that would be run but not execute them", action="store_true")]
 
 @dataclass
-class NSInitArgs(NSArgs, DryRunArgs):
+class NSBasicArgs(NSArgs, DryRunArgs):
     pass
 
 
-def net_init(args: NSInitArgs):
+def net_init(args: NSBasicArgs):
     ns_config = load_namespace_config(args.ns_name)
 
     try:
@@ -56,13 +56,47 @@ def net_init(args: NSInitArgs):
         raise RuntimeError(f"Failed to create network namespace: {e}")
 
 
+def net_init_dns_config(args: NSBasicArgs):
+    ns_config = load_namespace_config(args.ns_name)
+    if not ns_config.namespaces.mount:
+        raise RuntimeError("No mount namespace found, it is required for custom dns conf.")
+
+    dry_run = args.dry_run
+    # Configure DNS for the namespace
+    print("Configuring DNS for the namespace")
+    ns_resolv_dir = f"/etc/netns/{ns_config.name}"
+    run_check(
+        f"mkdir -p {ns_resolv_dir}",
+        dry_run=dry_run,
+        escalate="sudo")
+    run_check(
+        f"cp /etc/resolv.conf {os.path.join(ns_resolv_dir, 'resolv.conf')}",
+        dry_run=dry_run,
+        escalate="sudo")
+
+
+def net_remove_dns_config(
+        args:NSBasicArgs):
+    ns_config = load_namespace_config(args.ns_name)
+
+    # Remove the DNS configuration for the namespace
+    ns_resolv_dir = f"/etc/netns/{ns_config.name}"
+    if os.path.exists(os.path.join(ns_resolv_dir, "resolv.conf")):
+        run_check(
+            ["rm", "-rf", ns_resolv_dir],
+            dry_run=args.dry_run,
+            escalate="sudo")
+
+
 @dataclass
 class NSRemoveArgs(NSArgs, DryRunArgs):
     pass
 
 
-def net_remove(args: NSRemoveArgs):
+def net_remove(args: NSBasicArgs):
     ns_config = load_namespace_config(args.ns_name)
+    if ns_config.namespaces.mount:
+        net_remove_dns_config(args)
 
     # Check if the namespace is already removed
     netns_list = run_check_output(
@@ -258,7 +292,10 @@ def create_namespace(args: CreateNSArgs) -> None:
     save_namespace_config(ns_name, config=config)
 
     if net:
-        net_init(NSInitArgs(ns_name = config.name, dry_run=args.dry_run))
+        net_init(NSBasicArgs(ns_name = config.name, dry_run=args.dry_run))
+
+    if mount and net:
+        net_init_dns_config(NSBasicArgs(ns_name = config.name, dry_run=args.dry_run))
 
     print(f"Created namespace {ns_name} with PID {unshare_pid}")
 
@@ -482,10 +519,6 @@ def ps(args: PSArgs):
 #     # Allow forwarding from the namespace veth to the loopback interface, useful for port forwarding
 #     run_cmd_sudo(f"iptables -A FORWARD -i lo -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT")
 
-#     print("Configuring DNS for the namespace")
-#     ns_resolv_dir = f"/etc/netns/{ns_name}"
-#     run_cmd_sudo(f"mkdir -p {ns_resolv_dir}", dry_run=dry_run)
-#     run_cmd_sudo(f"cp /etc/resolv.conf {os.path.join(ns_resolv_dir, 'resolv.conf')}", dry_run=dry_run)
 
 #     config_data = {
 #         "ns_name": ns_name,
@@ -531,7 +564,7 @@ def destroy_namespace(args: DestroyNSArgs):
 
     if ns_config.namespaces.net:
         # Remove the network namespace links
-        net_remove(NSRemoveArgs(ns_name=ns_config.name, dry_run=args.dry_run))
+        net_remove(NSBasicArgs(ns_name=ns_config.name, dry_run=args.dry_run))
 
     print(f"Seeing if there are still processes in the namespace {ns_name}")
     owner_pid = ns_config.pid
