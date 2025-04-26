@@ -12,7 +12,7 @@ from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass, Datacla
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
 from nsctl.processes import run_check, run_in_namespace, run_cmd_sudo, \
-    find_bottom_children, process_exists, run_check_output, run_check_code
+    find_bottom_children, process_exists, run_check_output
 from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
     disable_ip_forwarding, disable_route_localnet
@@ -35,19 +35,25 @@ class NSInitArgs(NSArgs, DryRunArgs):
 def net_init(args: NSInitArgs):
     ns_config = load_namespace_config(args.ns_name)
 
-    # Activate loopback device
-    run_check(
-        "ip set up lo",
-        ns=ns_config,
-        dry_run=args.dry_run,
-    )
+    try:
+        # Activate loopback device
+        run_check(
+            "ip set up lo",
+            ns=ns_config,
+            dry_run=args.dry_run,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to set up loopback device: {e}")
 
-    # create named net ns
-    run_check(
-        f"ip netns add {ns_config.name} /proc/{ns_config.pid}/ns/net",
-        escalate="sudo",
-        dry_run=args.dry_run,
-    )
+    try:
+        # create named net ns
+        run_check(
+            f"ip netns add {ns_config.name} /proc/{ns_config.pid}/ns/net",
+            escalate="sudo",
+            dry_run=args.dry_run,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to create network namespace: {e}")
 
 
 @dataclass
@@ -63,7 +69,7 @@ def net_remove(args: NSRemoveArgs):
         "ip netns list",
     )
 
-    if netns_list is None or ns_config.name not in netns_list:
+    if ns_config.name not in netns_list:
         print(f"Namespace {ns_config.name} already removed.")
         return
 
