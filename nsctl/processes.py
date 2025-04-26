@@ -1,10 +1,10 @@
-import sys
+import time
 import os, shlex, subprocess, shutil
 import psutil
 from collections.abc import Mapping
-from typing import cast, Any, Literal
+from typing import Literal
 
-from nsctl.config import NSInfo, Namespaces
+from nsctl.config import NSInfo
 from nsctl.utils import get_uid, get_gid, check_ops
 
 
@@ -202,6 +202,65 @@ def run_check_code(cmd: list[str] | str,
         raise RuntimeError(f"Expected CompletedProcess, got {type(result)}")
 
     return result.returncode
+
+
+def detach(
+        cmd: list[str] | str,
+        dry_run: bool = False,
+        env: Mapping[str, str] | None = None,
+        escalate: Escalate = None,
+        ns: NSInfo|None = None,
+        as_user: str|None = None,) -> subprocess.Popen[str]:
+    
+    work_dir = os.getcwd()
+    ns_pid = None
+    if ns is not None and escalate is None:
+        ns_pid = ns.pid
+        if not check_ops(ns.namespaces):
+            escalate = "sudo"
+
+    result = _exec_cmd(
+        cmd,
+        capture_output=False,
+        check=False,
+        env=env,
+        escalate=escalate,
+        dry_run=dry_run,
+        ns_pid=ns_pid,
+        as_user=as_user,
+        working_dir=work_dir,
+    )
+
+    if not isinstance(result, subprocess.Popen):
+        raise RuntimeError(f"Expected Popen, got {type(result)}")
+
+    return result
+
+
+def detach_and_check(
+        cmd: list[str] | str,
+        dry_run: bool = False,
+        env: Mapping[str, str] | None = None,
+        escalate: Escalate = None,
+        ns: NSInfo|None = None,
+        as_user: str|None = None,
+        wait_time: float = 1.) -> subprocess.Popen[str]:
+    
+    process = detach(
+        cmd,
+        dry_run=dry_run,
+        env=env,
+        escalate=escalate,
+        ns=ns,
+        as_user=as_user)
+
+    # Wait for the process to start, and check that it didn't fail
+    time.sleep(wait_time)
+    if process.poll() is not None:
+        raise RuntimeError(
+            "Detached process exited immediately, indicating failure.")
+
+    return process
 
 
 def find_bottom_children(pid: int) -> list[psutil.Process]:
