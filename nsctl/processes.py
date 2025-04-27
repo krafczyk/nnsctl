@@ -234,10 +234,12 @@ def run_code_passthrough(cmd: list[str] | str,
         if not check_ops(ns.namespaces):
             escalate = "sudo"
 
+    # We don't throw an error if the command fails
+    # We don't capture the output
     result = _exec_cmd(
         cmd,
         capture_output=False,
-        check=True,
+        check=False,
         env=env,
         escalate=escalate,
         dry_run=dry_run,
