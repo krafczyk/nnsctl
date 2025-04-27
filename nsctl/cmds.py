@@ -69,8 +69,6 @@ def net_init_dns_config(args: NSBasicArgs):
     ns_config = load_namespace_config(args.ns_name)
     if not ns_config.namespaces.mount:
         raise RuntimeError("No mount namespace found, it is required for custom dns conf.")
-    print("net_init_dns_config ns_config loaded:")
-    print(ns_config)
 
     # Configure DNS for the namespace
     print("Configuring DNS for the namespace")
@@ -147,10 +145,11 @@ def net_remove(args: NSBasicArgs):
 
 
 @dataclass
-class NetAddMacvlanArgs(NSArgs):
+class NetAddMacvlanArgs(NSArgs, VerboseArgs):
     dev: Annotated[str, Arg("--dev", help="Name of device to use. Otherwise it will be macvlan0", default="mavlan0")]
     host_if: Annotated[str|None, Arg("--host-if", help="The host if to use, if not specified, a heuristic is used to find it instead.", required=False)]
     ip: Annotated[str|None, Arg("--ip", help="IP to assign, otherwise use dhclient (dhcp)", required=False, type=str)]
+
 
 def net_add_macvlan(args: NetAddMacvlanArgs):
     ns_name = args.ns_name
@@ -171,29 +170,22 @@ def net_add_macvlan(args: NetAddMacvlanArgs):
     # Create the macvlan interface on the host
     run_check(
         f"ip link add link {host_iface} name {macvlan_name} type macvlan mode bridge",
-        escalate="sudo")
+        escalate="sudo",
+        verbose=args.verbose)
 
     # Assign it to the net namespace
     run_check(
         f"ip link set {macvlan_name} netns {ns_config.name}",
-        escalate="sudo")
+        escalate="sudo",
+        verbose=args.verbose)
 
-    # # Use dhclient to get an IP address
-    # # TODO: Make this more cross-platform
-    # process = subprocess.Popen(
-    #     cmd,
-    #     stdout=subprocess.PIPE,
-    #     stderr=subprocess.STDOUT,
-    #     start_new_session=True, # Create a new session, detaching the process
-    # )
-
-    # # Wait for the process to start, and check that it didn't fail
-    # time.sleep(1)
-    # if process.poll() is not None:
-    # run_in_namespace(
-    #     ns_config,
-    #     "dhclient "
-    #         )
+    # Launch dhclient on macvlan interface inside the namespace
+    _ = detach_and_check(
+        f"dhclient {macvlan_name}",
+        escalate="sudo",
+        ns=ns_config,
+        verbose=args.verbose,
+    )
 
 
 @dataclass
