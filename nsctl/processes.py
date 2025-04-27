@@ -24,7 +24,8 @@ def _exec_cmd(cmd: list[str] | str,
               working_dir: str | None = None,
               # privilege
               escalate: Escalate = None,
-              as_user: str | None = None
+              as_user: str | None = None,
+              passthrough: bool = False,
               ) -> subprocess.CompletedProcess[str] | subprocess.Popen[str] | None:
     """
     Bottom level executor
@@ -69,17 +70,31 @@ def _exec_cmd(cmd: list[str] | str,
 
     # ----------------------- execution path --------------------------
     if detach:
+        stdin = subprocess.DEVNULL
+        stdout = subprocess.DEVNULL
+        stderr = subprocess.DEVNULL
+        if passthrough:
+            stdin = None
+            stdout = None
+            stderr = None
         return subprocess.Popen(
             cmd_args,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            stdin=stdin,
             env=env,
             start_new_session=True,
             text=True,
         )
+    stdin = None
+    stdout = None
+    stderr = None
     return subprocess.run(
         cmd_args,
         text=True,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
         capture_output=capture_output,
         env=env,
         check=check
@@ -196,6 +211,40 @@ def run_check_code(cmd: list[str] | str,
         ns_pid=ns_pid,
         as_user=as_user,
         working_dir=work_dir,
+    )
+
+    if type(result) is not subprocess.CompletedProcess:
+        raise RuntimeError(f"Expected CompletedProcess, got {type(result)}")
+
+    return result.returncode
+
+
+def run_code_passthrough(cmd: list[str] | str,
+              *,
+              dry_run: bool = False,
+              env: Mapping[str, str] | None = None,
+              escalate: Escalate = None,
+              ns: NSInfo|None = None,
+              as_user: str|None = None,) -> int:
+    """Runs a command, checks if the command failed, and returns the return code."""
+    work_dir = os.getcwd()
+    ns_pid = None
+    if ns is not None and escalate is None:
+        ns_pid = ns.pid
+        if not check_ops(ns.namespaces):
+            escalate = "sudo"
+
+    result = _exec_cmd(
+        cmd,
+        capture_output=False,
+        check=True,
+        env=env,
+        escalate=escalate,
+        dry_run=dry_run,
+        ns_pid=ns_pid,
+        as_user=as_user,
+        working_dir=work_dir,
+        passthrough=True,
     )
 
     if type(result) is not subprocess.CompletedProcess:
