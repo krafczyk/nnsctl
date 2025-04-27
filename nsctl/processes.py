@@ -155,7 +155,7 @@ def run_check_output(cmd: list[str] | str,
 
     result = _exec_cmd(
         cmd,
-        capture_output=False,
+        capture_output=True,
         check=True,
         env=env,
         escalate=escalate,
@@ -221,6 +221,7 @@ def detach(
 
     result = _exec_cmd(
         cmd,
+        detach=True,
         capture_output=False,
         check=False,
         env=env,

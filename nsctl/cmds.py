@@ -277,6 +277,8 @@ def create_namespace(args: CreateNSArgs) -> None:
     if sleep_process.name() != "sleep":
         raise RuntimeError(f"Expected detected sleeper process at PID {sleeper_pid} to be 'sleep' but found {sleep_process.name()}. unshare PID was {unshare_pid}.")
 
+    print(f"Namspaces created, Sleeper PID: {sleeper_pid}")
+
     # Create configuration data
     config = NSInfo(
         name=ns_name,
