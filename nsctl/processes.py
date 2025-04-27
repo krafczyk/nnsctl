@@ -18,6 +18,7 @@ def _exec_cmd(cmd: list[str] | str,
               capture_output: bool = False,
               check: bool = False,
               dry_run: bool = False,
+              verbose: bool = False,
               env: Mapping[str, str] | None = None,
               # namespace
               ns_pid: int | None = None,
@@ -35,7 +36,6 @@ def _exec_cmd(cmd: list[str] | str,
     * `escalate`    -> prepend `sudo -n` or `pkexec` **once**, *before* nsenter.
     * `as_user`     -> translate to `--setuid/--setgid` when using nsenter.
     """
-
     # ----------------------- validate --------------------------
     if detach and capture_output:
         raise ValueError("Cannot use detach=True with capture_output=True.")
@@ -77,6 +77,8 @@ def _exec_cmd(cmd: list[str] | str,
             stdin = None
             stdout = None
             stderr = None
+        if verbose:
+            print(f"DETACH: {' '.join(cmd_args)}")
         return subprocess.Popen(
             cmd_args,
             stdout=stdout,
@@ -86,6 +88,8 @@ def _exec_cmd(cmd: list[str] | str,
             start_new_session=True,
             text=True,
         )
+    if verbose:
+        print(f"RUN: {' '.join(cmd_args)}")
     stdin = None
     stdout = None
     stderr = None
@@ -100,19 +104,27 @@ def _exec_cmd(cmd: list[str] | str,
         check=check
     )
 
-def run(cmd: list[str] | str,
-              *,
-              dry_run: bool = False,
-              env: Mapping[str, str] | None = None,
-              escalate: Escalate = None,
-              ns: NSInfo|None = None,
-              as_user: str|None = None,) -> None:
-    work_dir = os.getcwd()
-    ns_pid = None
-    if ns is not None and escalate is None:
-        ns_pid = ns.pid
+
+def handle_ns(ns: NSInfo|None, escalate: Escalate = None) -> tuple[int|None,Escalate]:
+    if ns is None:
+        return (None, escalate)
+
+    if escalate is None:
         if not check_ops(ns.namespaces):
             escalate = "sudo"
+    return (ns.pid, escalate)
+
+
+def run(cmd: list[str] | str,
+        *,
+        dry_run: bool = False,
+        verbose: bool = False,
+        env: Mapping[str, str] | None = None,
+        escalate: Escalate = None,
+        ns: NSInfo|None = None,
+        as_user: str|None = None,) -> None:
+    work_dir = os.getcwd()
+    ns_pid, escalate = handle_ns(ns, escalate)
 
     _ = _exec_cmd(
         cmd,
@@ -121,6 +133,7 @@ def run(cmd: list[str] | str,
         env=env,
         escalate=escalate,
         dry_run=dry_run,
+        verbose=verbose,
         ns_pid=ns_pid,
         as_user=as_user,
         working_dir=work_dir,
@@ -129,16 +142,13 @@ def run(cmd: list[str] | str,
 def run_check(cmd: list[str] | str,
               *,
               dry_run: bool = False,
+              verbose: bool = False,
               env: Mapping[str, str] | None = None,
               escalate: Escalate = None,
               ns: NSInfo|None = None,
               as_user: str|None = None,) -> None:
     work_dir = os.getcwd()
-    ns_pid = None
-    if ns is not None and escalate is None:
-        ns_pid = ns.pid
-        if not check_ops(ns.namespaces):
-            escalate = "sudo"
+    ns_pid, escalate = handle_ns(ns, escalate)
 
     _ = _exec_cmd(
         cmd,
@@ -147,6 +157,7 @@ def run_check(cmd: list[str] | str,
         env=env,
         escalate=escalate,
         dry_run=dry_run,
+        verbose=verbose,
         ns_pid=ns_pid,
         as_user=as_user,
         working_dir=work_dir,
@@ -156,17 +167,14 @@ def run_check(cmd: list[str] | str,
 def run_check_output(cmd: list[str] | str,
               *,
               dry_run: bool = False,
+              verbose: bool = False,
               env: Mapping[str, str] | None = None,
               escalate: Escalate = None,
               ns: NSInfo|None = None,
               as_user: str|None = None,) -> str:
     """Runs a command, checks if the command failed, and returns the return code."""
     work_dir = os.getcwd()
-    ns_pid = None
-    if ns is not None and escalate is None:
-        ns_pid = ns.pid
-        if not check_ops(ns.namespaces):
-            escalate = "sudo"
+    ns_pid, escalate = handle_ns(ns, escalate)
 
     result = _exec_cmd(
         cmd,
@@ -175,6 +183,7 @@ def run_check_output(cmd: list[str] | str,
         env=env,
         escalate=escalate,
         dry_run=dry_run,
+        verbose=verbose,
         ns_pid=ns_pid,
         as_user=as_user,
         working_dir=work_dir,
@@ -187,19 +196,16 @@ def run_check_output(cmd: list[str] | str,
 
 
 def run_check_code(cmd: list[str] | str,
-              *,
-              dry_run: bool = False,
-              env: Mapping[str, str] | None = None,
-              escalate: Escalate = None,
-              ns: NSInfo|None = None,
-              as_user: str|None = None,) -> int:
+                   *,
+                   dry_run: bool = False,
+                   verbose: bool = False,
+                   env: Mapping[str, str] | None = None,
+                   escalate: Escalate = None,
+                   ns: NSInfo|None = None,
+                   as_user: str|None = None,) -> int:
     """Runs a command, checks if the command failed, and returns the return code."""
     work_dir = os.getcwd()
-    ns_pid = None
-    if ns is not None and escalate is None:
-        ns_pid = ns.pid
-        if not check_ops(ns.namespaces):
-            escalate = "sudo"
+    ns_pid, escalate = handle_ns(ns, escalate)
 
     result = _exec_cmd(
         cmd,
@@ -208,6 +214,7 @@ def run_check_code(cmd: list[str] | str,
         env=env,
         escalate=escalate,
         dry_run=dry_run,
+        verbose=verbose,
         ns_pid=ns_pid,
         as_user=as_user,
         working_dir=work_dir,
@@ -220,19 +227,16 @@ def run_check_code(cmd: list[str] | str,
 
 
 def run_code_passthrough(cmd: list[str] | str,
-              *,
-              dry_run: bool = False,
-              env: Mapping[str, str] | None = None,
-              escalate: Escalate = None,
-              ns: NSInfo|None = None,
-              as_user: str|None = None,) -> int:
+                         *,
+                         dry_run: bool = False,
+                         verbose: bool = False,
+                         env: Mapping[str, str] | None = None,
+                         escalate: Escalate = None,
+                         ns: NSInfo|None = None,
+                         as_user: str|None = None,) -> int:
     """Runs a command, checks if the command failed, and returns the return code."""
     work_dir = os.getcwd()
-    ns_pid = None
-    if ns is not None and escalate is None:
-        ns_pid = ns.pid
-        if not check_ops(ns.namespaces):
-            escalate = "sudo"
+    ns_pid, escalate = handle_ns(ns, escalate)
 
     # We don't throw an error if the command fails
     # We don't capture the output
@@ -243,6 +247,7 @@ def run_code_passthrough(cmd: list[str] | str,
         env=env,
         escalate=escalate,
         dry_run=dry_run,
+        verbose=verbose,
         ns_pid=ns_pid,
         as_user=as_user,
         working_dir=work_dir,
@@ -258,17 +263,14 @@ def run_code_passthrough(cmd: list[str] | str,
 def detach(
         cmd: list[str] | str,
         dry_run: bool = False,
+        verbose: bool = False,
         env: Mapping[str, str] | None = None,
         escalate: Escalate = None,
         ns: NSInfo|None = None,
         as_user: str|None = None,) -> subprocess.Popen[str]:
     
     work_dir = os.getcwd()
-    ns_pid = None
-    if ns is not None and escalate is None:
-        ns_pid = ns.pid
-        if not check_ops(ns.namespaces):
-            escalate = "sudo"
+    ns_pid, escalate = handle_ns(ns, escalate)
 
     result = _exec_cmd(
         cmd,
@@ -278,6 +280,7 @@ def detach(
         env=env,
         escalate=escalate,
         dry_run=dry_run,
+        verbose=verbose,
         ns_pid=ns_pid,
         as_user=as_user,
         working_dir=work_dir,
@@ -292,6 +295,7 @@ def detach(
 def detach_and_check(
         cmd: list[str] | str,
         dry_run: bool = False,
+        verbose: bool = False,
         env: Mapping[str, str] | None = None,
         escalate: Escalate = None,
         ns: NSInfo|None = None,
@@ -301,6 +305,7 @@ def detach_and_check(
     process = detach(
         cmd,
         dry_run=dry_run,
+        verbose=verbose,
         env=env,
         escalate=escalate,
         ns=ns,

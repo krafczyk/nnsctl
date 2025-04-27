@@ -11,7 +11,7 @@ from typing import Annotated, cast
 from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass, DataclassType, Handler
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
-from nsctl.processes import run_check, run_check_output, run_code_passthrough, \
+from nsctl.processes import run, run_check, run_check_output, run_code_passthrough, \
     find_bottom_children, process_exists, detach_and_check
 from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
@@ -23,12 +23,19 @@ from nsctl import VERSION
 class NSArgs:
     ns_name: Annotated[str, Arg(help="The name of the namespace")]
 
+
 @dataclass
 class DryRunArgs:
     dry_run: Annotated[bool, Arg("--dry-run", help="If passed report the commands that would be run but not execute them", action="store_true")]
 
+
 @dataclass
-class NSBasicArgs(NSArgs, DryRunArgs):
+class VerboseArgs:
+    verbose: Annotated[bool, Arg("--verbose", help="If passed report the commands that are being run", action="store_true")]
+
+
+@dataclass
+class NSBasicArgs(NSArgs, DryRunArgs, VerboseArgs):
     pass
 
 
@@ -41,6 +48,7 @@ def net_init(args: NSBasicArgs):
             "ip link set dev lo up",
             ns=ns_config,
             dry_run=args.dry_run,
+            verbose=args.verbose,
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to set up loopback device: {e}")
@@ -51,6 +59,7 @@ def net_init(args: NSBasicArgs):
             f"ip netns add {ns_config.name} /proc/{ns_config.pid}/ns/net",
             escalate="sudo",
             dry_run=args.dry_run,
+            verbose=args.verbose,
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to create network namespace: {e}")
@@ -60,37 +69,57 @@ def net_init_dns_config(args: NSBasicArgs):
     ns_config = load_namespace_config(args.ns_name)
     if not ns_config.namespaces.mount:
         raise RuntimeError("No mount namespace found, it is required for custom dns conf.")
+    print("net_init_dns_config ns_config loaded:")
+    print(ns_config)
 
-    dry_run = args.dry_run
     # Configure DNS for the namespace
     print("Configuring DNS for the namespace")
-    ns_resolv_dir = f"/etc/netns/{ns_config.name}"
+    # Copy existing resolv.conf to managed directory
+    new_resolv_path = os.path.join(ns_config_base_path, ns_config.name, "resolv.conf")
+    _ = shutil.copyfile("/etc/resolv.conf", new_resolv_path)
+    # Prepare a new bind mount
+    #run_check(
+    #    f"umount /etc/resolv.conf",
+    #    dry_run=dry_run,
+    #    verbose=verbose,
+    #    escalate="sudo",
+    #    ns=ns_config,
+    #)
+    #run_check(
+    #    f"touch /etc/resolv.conf",
+    #    dry_run=dry_run,
+    #    verbose=verbose,
+    #    escalate="sudo",
+    #    ns=ns_config,
+    #)
     run_check(
-        f"mkdir -p {ns_resolv_dir}",
-        dry_run=dry_run,
-        escalate="sudo")
-    run_check(
-        f"cp /etc/resolv.conf {os.path.join(ns_resolv_dir, 'resolv.conf')}",
-        dry_run=dry_run,
-        escalate="sudo")
+        f"mount --bind {new_resolv_path} /etc/resolv.conf",
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+        escalate="sudo",
+        ns = ns_config,
+    )
 
 
 def net_remove_dns_config(
         args:NSBasicArgs):
     ns_config = load_namespace_config(args.ns_name)
 
+    new_resolv_path = os.path.join(ns_config_base_path, ns_config.name, "resolv.conf")
     # Remove the DNS configuration for the namespace
-    ns_resolv_dir = f"/etc/netns/{ns_config.name}"
-    if os.path.exists(os.path.join(ns_resolv_dir, "resolv.conf")):
-        run_check(
-            ["rm", "-rf", ns_resolv_dir],
-            dry_run=args.dry_run,
-            escalate="sudo")
-
-
-@dataclass
-class NSRemoveArgs(NSArgs, DryRunArgs):
-    pass
+    run(
+        f"umount /etc/resolv.conf",
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+        escalate="sudo",
+        ns=ns_config,
+    )
+    run(
+        ["rm", "-rf", new_resolv_path],
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+        escalate="sudo"
+    )
 
 
 def net_remove(args: NSBasicArgs):
@@ -101,6 +130,7 @@ def net_remove(args: NSBasicArgs):
     # Check if the namespace is already removed
     netns_list = run_check_output(
         "ip netns list",
+        verbose=args.verbose,
     )
 
     if ns_config.name not in netns_list:
@@ -108,10 +138,11 @@ def net_remove(args: NSBasicArgs):
         return
 
     # destroy named net ns
-    run_check(
+    run(
         f"ip netns del {ns_config.name}",
         escalate="sudo",
         dry_run=args.dry_run,
+        verbose=args.verbose,
     )
 
 
@@ -183,7 +214,7 @@ def net_remove_macvlan(args: NetRemoveMacvlanArgs):
 
 
 @dataclass
-class CreateNSArgs(NSArgs, DryRunArgs):
+class CreateNSArgs(NSBasicArgs):
     net: Annotated[bool, Arg("--net", help="Create a network namespace")]
     mount: Annotated[bool, Arg("--mount", help="Create a mount namespace")]
     pid: Annotated[bool, Arg("--pid", help="Create a pid namespace")]
@@ -259,6 +290,7 @@ def create_namespace(args: CreateNSArgs) -> None:
         cmd,
         escalate="sudo" if not check_ops(ns) else None,
         dry_run=args.dry_run,
+        verbose=args.verbose,
         wait_time=1,
     )
 
@@ -294,10 +326,10 @@ def create_namespace(args: CreateNSArgs) -> None:
     save_namespace_config(ns_name, config=config)
 
     if net:
-        net_init(NSBasicArgs(ns_name = config.name, dry_run=args.dry_run))
+        net_init(NSBasicArgs(ns_name = config.name, dry_run=args.dry_run, verbose=args.verbose))
 
     if mount and net:
-        net_init_dns_config(NSBasicArgs(ns_name = config.name, dry_run=args.dry_run))
+        net_init_dns_config(NSBasicArgs(ns_name = config.name, dry_run=args.dry_run, verbose=args.verbose))
 
     print(f"Created namespace {ns_name} with PID {unshare_pid}")
 
@@ -545,7 +577,7 @@ def ps(args: PSArgs):
 
 
 @dataclass
-class DestroyNSArgs(NSArgs, DryRunArgs):
+class DestroyNSArgs(NSBasicArgs):
     force: Annotated[bool, Arg(help="Force kill running processes in the namespace")]
     sudo: Annotated[bool, Arg(help="Use sudo to kill processes.")]
 
@@ -566,7 +598,7 @@ def destroy_namespace(args: DestroyNSArgs):
 
     if ns_config.namespaces.net:
         # Remove the network namespace links
-        net_remove(NSBasicArgs(ns_name=ns_config.name, dry_run=args.dry_run))
+        net_remove(NSBasicArgs(ns_name=ns_config.name, dry_run=args.dry_run, verbose=args.verbose))
 
     print(f"Seeing if there are still processes in the namespace {ns_name}")
     owner_pid = ns_config.pid
