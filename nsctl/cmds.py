@@ -38,7 +38,7 @@ def net_init(args: NSBasicArgs):
     try:
         # Activate loopback device
         run_check(
-            "ip set up lo",
+            "ip link set dev lo up",
             ns=ns_config,
             dry_run=args.dry_run,
         )
