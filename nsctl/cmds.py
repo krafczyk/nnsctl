@@ -110,6 +110,14 @@ def net_remove_dns_config(
         ns=ns_config,
     )
 
+    # Remove the overlay directories
+    run(
+        f"rm -rf {os.path.join(ns_config_base_path, ns_config.name)}",
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+        escalate="sudo",
+    )
+
 
 def net_remove(args: NSBasicArgs):
     ns_config = load_namespace_config(args.ns_name)
