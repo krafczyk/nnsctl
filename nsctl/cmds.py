@@ -56,7 +56,7 @@ def net_init(args: NSBasicArgs):
     try:
         # create named net ns
         run_check(
-            f"ip netns add {ns_config.name} /proc/{ns_config.pid}/ns/net",
+            f"ip netns attach {ns_config.name} {ns_config.pid}",
             escalate="sudo",
             dry_run=args.dry_run,
             verbose=args.verbose,
@@ -146,7 +146,7 @@ def net_remove(args: NSBasicArgs):
 
 @dataclass
 class NetAddMacvlanArgs(NSArgs, VerboseArgs):
-    dev: Annotated[str, Arg("--dev", help="Name of device to use. Otherwise it will be macvlan0", default="mavlan0")]
+    dev: Annotated[str, Arg("--dev", help="Name of device to use. Otherwise it will be macvlan0", default="macvlan0")]
     host_if: Annotated[str|None, Arg("--host-if", help="The host if to use, if not specified, a heuristic is used to find it instead.", required=False)]
     ip: Annotated[str|None, Arg("--ip", help="IP to assign, otherwise use dhclient (dhcp)", required=False, type=str)]
 
@@ -173,11 +173,11 @@ def net_add_macvlan(args: NetAddMacvlanArgs):
         escalate="sudo",
         verbose=args.verbose)
 
-    # Assign it to the net namespace
     run_check(
         f"ip link set {macvlan_name} netns {ns_config.name}",
         escalate="sudo",
-        verbose=args.verbose)
+        verbose=args.verbose,
+    )
 
     # Launch dhclient on macvlan interface inside the namespace
     _ = detach_and_check(
@@ -190,7 +190,7 @@ def net_add_macvlan(args: NetAddMacvlanArgs):
 
 @dataclass
 class NetRemoveMacvlanArgs(NSArgs):
-    dev: Annotated[str, Arg("--dev", help="Name of device to use. Otherwise it will be macvlan0", default="mavlan0")]
+    dev: Annotated[str, Arg("--dev", help="Name of device to use. Otherwise it will be macvlan0", default="macvlan0")]
 
 
 def net_remove_macvlan(args: NetRemoveMacvlanArgs):
@@ -611,11 +611,11 @@ def destroy_namespace(args: DestroyNSArgs):
 
     elif pids and force:
         print("Killing processes in the namespace:")
-        run_check(["kill", "-TERM"]+list(map(str, pids)), escalate=escalate, dry_run=args.dry_run)
+        run_check(["kill", "-TERM"]+list(map(str, pids)), escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
         time.sleep(5)
         pids = prune_processes(pids)
         if pids:
-            run_check(["kill", "-KILL"]+list(map(str,pids)), escalate=escalate, dry_run=args.dry_run)
+            run_check(["kill", "-KILL"]+list(map(str,pids)), escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
         time.sleep(5)
         pids = prune_processes(pids)
         if pids:
@@ -623,10 +623,10 @@ def destroy_namespace(args: DestroyNSArgs):
 
     if process_exists(owner_pid):
         # Delete the namespace
-        run_check(["kill", "-TERM", str(owner_pid)], escalate=escalate, dry_run=args.dry_run)
+        run_check(["kill", "-TERM", str(owner_pid)], escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
         time.sleep(5)
         if process_exists(owner_pid):
-            run_check(["kill", "-KILL", str(owner_pid)], escalate=escalate, dry_run=args.dry_run)
+            run_check(["kill", "-KILL", str(owner_pid)], escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
         time.sleep(5)
         if process_exists(owner_pid):
             raise RuntimeError(f"Failed to kill the namespace process {owner_pid}. It is still running.")
@@ -692,7 +692,7 @@ def destroy_namespace(args: DestroyNSArgs):
 
 
 @dataclass
-class ExecArgs(NSArgs, DryRunArgs):
+class ExecArgs(NSBasicArgs):
     as_user: Annotated[str, Arg("--as-user", help="Use sudo -u to execute the command as your user inside the namespace", default="nobody")]
     command: Annotated[list[str], Arg(nargs=argparse.REMAINDER, help="Command to execute")]
 
@@ -711,7 +711,8 @@ def exec_in_namespace(args: ExecArgs):
         args.command,
         ns=ns_config,
         as_user=as_user,
-        dry_run=args.dry_run))
+        dry_run=args.dry_run,
+        verbose=args.verbose))
 
 
 #def port_forward_add(args):
