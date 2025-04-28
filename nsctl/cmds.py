@@ -39,32 +39,6 @@ class NSBasicArgs(NSArgs, DryRunArgs, VerboseArgs):
     pass
 
 
-def net_init(args: NSBasicArgs):
-    ns_config = load_namespace_config(args.ns_name)
-
-    try:
-        # Activate loopback device
-        run_check(
-            "ip link set dev lo up",
-            ns=ns_config,
-            dry_run=args.dry_run,
-            verbose=args.verbose,
-        )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to set up loopback device: {e}")
-
-    try:
-        # create named net ns
-        run_check(
-            f"ip netns attach {ns_config.name} {ns_config.pid}",
-            escalate="sudo",
-            dry_run=args.dry_run,
-            verbose=args.verbose,
-        )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to create network namespace: {e}")
-
-
 def net_init_dns_config(args: NSBasicArgs):
     ns_config = load_namespace_config(args.ns_name)
     if not ns_config.namespaces.mount:
@@ -91,11 +65,42 @@ def net_init_dns_config(args: NSBasicArgs):
     )
 
 
+def net_init(args: NSBasicArgs):
+    ns_config = load_namespace_config(args.ns_name)
+
+    if not ns_config.namespaces.net:
+        raise RuntimeError("No network namespace found, it is required for net init.")
+
+    try:
+        # Activate loopback device
+        run_check(
+            "ip link set dev lo up",
+            ns=ns_config,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to set up loopback device: {e}")
+
+    try:
+        # create named net ns
+        run_check(
+            f"ip netns attach {ns_config.name} {ns_config.pid}",
+            escalate="sudo",
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to create network namespace: {e}")
+
+    if ns_config.namespaces.mount:
+        net_init_dns_config(args)
+
+
 def net_remove_dns_config(
         args:NSBasicArgs):
     ns_config = load_namespace_config(args.ns_name)
 
-    new_resolv_path = os.path.join(ns_config_base_path, ns_config.name, "resolv.conf")
     # Remove the DNS configuration for the namespace
     run(
         f"umount /etc",
@@ -320,12 +325,6 @@ def create_namespace(args: CreateNSArgs) -> None:
         os.makedirs(ns_config_path)
 
     save_namespace_config(ns_name, config=config)
-
-    if net:
-        net_init(NSBasicArgs(ns_name = config.name, dry_run=args.dry_run, verbose=args.verbose))
-
-    if mount and net:
-        net_init_dns_config(NSBasicArgs(ns_name = config.name, dry_run=args.dry_run, verbose=args.verbose))
 
     print(f"Created namespace {ns_name} with PID {unshare_pid}")
 
@@ -881,11 +880,10 @@ def main():
     parser_net = subparsers.add_parser("net", help="Execute a network namespace operation")
     subparsers_net = parser_net.add_subparsers(dest="subcommand", required=True)
 
-    ### net init command
-    ##parser_net_init = subparsers_net.add_parser("init", help="Initialize networking component")
-    ##add_dry_run(parser_net_init)
-    ##parser_net_init.add_argument("ns_name", help=ns_name_help)
-    ##parser_net_init.set_defaults(func=net_init)
+    # net init command
+    parser_net_init = subparsers_net.add_parser("init", help="Initialize networking component")
+    AddDataclassArguments(parser_net_init, NSBasicArgs)
+    parser_net_init.set_defaults(func=net_init)
 
     # net add command
     parser_net_add = subparsers_net.add_parser("add", help="Add a networking component")
