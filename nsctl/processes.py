@@ -312,10 +312,12 @@ def detach_and_check(
         as_user=as_user)
 
     # Wait for the process to start, and check that it didn't fail
-    time.sleep(wait_time)
-    if process.poll() is not None:
+    try:
+        returncode = process.wait(timeout=wait_time)
         raise RuntimeError(
-            "Detached process exited immediately, indicating failure.")
+            f"Detached process exited immediately, indicating failure. returncode was: {returncode}")
+    except subprocess.TimeoutExpired:
+        pass
 
     return process
 

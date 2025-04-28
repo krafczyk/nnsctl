@@ -15,7 +15,7 @@ from nsctl.processes import run, run_check, run_check_output, run_code_passthrou
     find_bottom_children, process_exists, detach_and_check
 from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
-    disable_ip_forwarding, disable_route_localnet
+    disable_ip_forwarding, disable_route_localnet, extract_ipv4_address
 from nsctl import VERSION
 
 
@@ -71,27 +71,19 @@ def net_init_dns_config(args: NSBasicArgs):
         raise RuntimeError("No mount namespace found, it is required for custom dns conf.")
 
     # Configure DNS for the namespace
-    print("Configuring DNS for the namespace")
-    # Copy existing resolv.conf to managed directory
-    new_resolv_path = os.path.join(ns_config_base_path, ns_config.name, "resolv.conf")
-    _ = shutil.copyfile("/etc/resolv.conf", new_resolv_path)
-    # Prepare a new bind mount
-    #run_check(
-    #    f"umount /etc/resolv.conf",
-    #    dry_run=dry_run,
-    #    verbose=verbose,
-    #    escalate="sudo",
-    #    ns=ns_config,
-    #)
-    #run_check(
-    #    f"touch /etc/resolv.conf",
-    #    dry_run=dry_run,
-    #    verbose=verbose,
-    #    escalate="sudo",
-    #    ns=ns_config,
-    #)
+    print("Configuring DNS for the namespace with overlay")
+    # Create overlay directories
+    ns_config_dir = os.path.join(ns_config_base_path, ns_config.name)
+    upper_dir=os.path.join(ns_config_dir, "upper")
+    work_dir=os.path.join(ns_config_dir, "work")
+    os.makedirs(upper_dir)
+    os.makedirs(work_dir)
     run_check(
-        f"mount --bind {new_resolv_path} /etc/resolv.conf",
+        [
+            "mount", "-t", "overlay", "none", "-o",
+            f"lowerdir=/etc,upperdir={upper_dir},workdir={work_dir}",
+            "/etc"
+        ],
         dry_run=args.dry_run,
         verbose=args.verbose,
         escalate="sudo",
@@ -106,17 +98,11 @@ def net_remove_dns_config(
     new_resolv_path = os.path.join(ns_config_base_path, ns_config.name, "resolv.conf")
     # Remove the DNS configuration for the namespace
     run(
-        f"umount /etc/resolv.conf",
+        f"umount /etc",
         dry_run=args.dry_run,
         verbose=args.verbose,
         escalate="sudo",
         ns=ns_config,
-    )
-    run(
-        ["rm", "-rf", new_resolv_path],
-        dry_run=args.dry_run,
-        verbose=args.verbose,
-        escalate="sudo"
     )
 
 
@@ -180,10 +166,28 @@ def net_add_macvlan(args: NetAddMacvlanArgs):
     )
 
     # Launch dhclient on macvlan interface inside the namespace
-    _ = detach_and_check(
+    run_check(
         f"dhclient {macvlan_name}",
         escalate="sudo",
         ns=ns_config,
+        verbose=args.verbose,
+    )
+
+    # Get the IP address of the macvlan interface
+    ip_addr_output = run_check_output(
+        f"ip netns exec {ns_config.name} ip addr show {macvlan_name}",
+        verbose=args.verbose)
+
+    # Extract the IP address from the output
+    ipv4_result = extract_ipv4_address(ip_addr_output, macvlan_name)
+
+    if ipv4_result is None:
+        raise RuntimeError(f"Failed to extract IP address for {macvlan_name} in namespace {ns_config.name}")
+
+    # Set a default route to the macvlan interface
+    run_check(
+        f"ip netns exec {ns_config.name} ip route add default via {ipv4_result} dev {macvlan_name}",
+        escalate="sudo",
         verbose=args.verbose,
     )
 

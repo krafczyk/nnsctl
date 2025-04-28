@@ -1,6 +1,7 @@
 import os
 from subprocess import CalledProcessError
 from nsctl.processes import run_check_output, run_check
+import re
 
 
 def get_active_ip_iface() -> tuple[str, str]:
@@ -111,3 +112,36 @@ def disable_ip_forwarding(dry_run:bool=False):
         "sysctl -w net.ipv4.ip_forward=0",
         dry_run=dry_run,
         escalate="sudo")
+
+
+def extract_ipv4_address(ip_addr_output: str, interface_name: str) -> str | None:
+    """
+    Extracts the primary global IPv4 address for a specific interface
+    from the output of 'ip addr show <interface>'.
+
+    Args:
+        ip_addr_output: The multi-line string output from 'ip addr show'.
+        interface_name: The name of the interface (e.g., 'macvlan0').
+
+    Returns:
+        The extracted IPv4 address (without CIDR) as a string,
+        or None if no matching address is found.
+    """
+    # Regex explanation:
+    # \s*inet\s+             # Match 'inet' surrounded by optional whitespace
+    # (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}) # Capture the IPv4 address (group 1)
+    # /\d{1,2}              # Match the CIDR prefix (e.g., /24)
+    # .* # Match any characters (like brd, scope)
+    # scope\s+global        # Ensure it's a global scope address
+    # \s+                     # Match whitespace
+    # {re.escape(interface_name)} # Match the specific interface name
+    # $                     # Ensure it's at the end of the line (or followed by newline)
+    pattern = re.compile(
+        rf"^\s*inet\s+(\d{{1,3}}\.\d{{1,3}}\.\d{{1,3}}\.\d{{1,3}})/\d{{1,2}}.*scope\s+global\s+{re.escape(interface_name)}$",
+        re.MULTILINE
+    )
+
+    match = pattern.search(ip_addr_output)
+    if match:
+        return match.group(1) # Return the captured IP address part
+    return None
