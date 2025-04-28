@@ -195,6 +195,37 @@ def run_check_output(cmd: list[str] | str,
     return result.stdout
 
 
+def run_code_output(cmd: list[str] | str,
+              *,
+              dry_run: bool = False,
+              verbose: bool = False,
+              env: Mapping[str, str] | None = None,
+              escalate: Escalate = None,
+              ns: NSInfo|None = None,
+              as_user: str|None = None,) -> tuple[int,str]:
+    """Runs a command, checks if the command failed, and returns the return code."""
+    work_dir = os.getcwd()
+    ns_pid, escalate = handle_ns(ns, escalate)
+
+    result = _exec_cmd(
+        cmd,
+        capture_output=True,
+        check=True,
+        env=env,
+        escalate=escalate,
+        dry_run=dry_run,
+        verbose=verbose,
+        ns_pid=ns_pid,
+        as_user=as_user,
+        working_dir=work_dir,
+    )
+
+    if type(result) is not subprocess.CompletedProcess:
+        raise RuntimeError(f"Expected CompletedProcess, got {type(result)}")
+
+    return (result.returncode, result.stdout)
+
+
 def run_check_code(cmd: list[str] | str,
                    *,
                    dry_run: bool = False,

@@ -11,11 +11,12 @@ from typing import Annotated, cast
 from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass, DataclassType, Handler
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
-from nsctl.processes import run, run_check, run_check_output, run_code_passthrough, \
+from nsctl.processes import run, run_check, run_check_output, run_code_passthrough, run_code_output, \
     find_bottom_children, process_exists, detach_and_check
 from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
     disable_ip_forwarding, disable_route_localnet, extract_ipv4_address
+from nsctl.config import NetMacvlan
 from nsctl import VERSION
 
 
@@ -187,9 +188,13 @@ def net_add_macvlan(args: NetAddMacvlanArgs):
     )
 
     # Get the IP address of the macvlan interface
-    ip_addr_output = run_check_output(
-        f"ip netns exec {ns_config.name} ip addr show {macvlan_name}",
-        verbose=args.verbose)
+    retval, ip_addr_output = run_code_output(
+        f"ip addr show {macvlan_name}",
+        verbose=args.verbose,
+        ns=ns_config,)
+
+    if retval != 0:
+        print(f"WARNING: ip command indicates failure when getting address. {retval}")
 
     # Extract the IP address from the output
     ipv4_result = extract_ipv4_address(ip_addr_output, macvlan_name)
@@ -197,12 +202,22 @@ def net_add_macvlan(args: NetAddMacvlanArgs):
     if ipv4_result is None:
         raise RuntimeError(f"Failed to extract IP address for {macvlan_name} in namespace {ns_config.name}")
 
-    # Set a default route to the macvlan interface
-    run_check(
-        f"ip netns exec {ns_config.name} ip route add default via {ipv4_result} dev {macvlan_name}",
-        escalate="sudo",
-        verbose=args.verbose,
-    )
+    # We actually don't need to do this because dhclient set it up for us!
+    ## Set a default route to the macvlan interface
+    #run_check(
+    #    f"ip route add default via {ipv4_result} dev {macvlan_name}",
+    #    escalate="sudo",
+    #    verbose=args.verbose,
+    #    ns=ns_config,
+    #)
+
+    ns_config.net.append(NetMacvlan(
+        kind="macvlan",
+        host_if=host_iface,
+        name=macvlan_name,
+        ip=ipv4_result))
+
+    save_namespace_config(ns_name, config=ns_config)
 
 
 @dataclass
