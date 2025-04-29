@@ -681,40 +681,40 @@ def destroy_namespace(args: DestroyNSArgs):
             disable_route_localnet("lo")
 
 
-# def status_namespace(args: NSArgs):
-#     ns_name = args.ns_name
-#     existing = run_cmd(["ip", "netns", "list"], capture_output=True).stdout
 
-#     if ns_name is None:
-#         print("Host Status:")
-#         print("IP Addresses")
-#         run_cmd("ip addr show")
-#         print("Routes")
-#         run_cmd("ip route show")
-#         print("IPTables")
-#         run_cmd_sudo("iptables -S")
-#         print("IPTables NAT")
-#         run_cmd_sudo("iptables -t nat -S")
-#         sys.exit(0)
+@dataclass
+class NetStatusArgs(VerboseArgs):
+    ns_name: Annotated[list[str], Arg(help="The name of the namespace. If not specified, show host status.", nargs='*')]
 
-#     if ns_name not in existing:
-#         print(f"Namespace {ns_name} does not exist.")
-#         sys.exit(1)
 
-#     print(f"Namespace {ns_name}:")
-#     print("IP Addresses")
-#     run_cmd_sudo(f"ip netns exec {ns_name} ip addr show")
-#     print("Routes")
-#     run_cmd_sudo(f"ip netns exec {ns_name} ip route show")
-#     print("IPTables")
-#     run_cmd_sudo(f"ip netns exec {ns_name} iptables -S")
-#     print("IPTables NAT")
-#     run_cmd_sudo(f"ip netns exec {ns_name} iptables -t nat -S")
+def net_status_namespace(args: NetStatusArgs):
+    ns_name = args.ns_name
 
-#     config_file = f"{ns_config_base_path}/{ns_name}/configuration.conf"
-#     namespace_config = load_namespace_config(ns_name)
-#     if namespace_config is not None:
-#         pprint(namespace_config)
+    print(ns_name)
+
+    if len(ns_name) == 0:
+        print("Host Status:")
+        print("IP Addresses")
+        run("ip addr show",  escalate="sudo", verbose=args.verbose)
+        print("Routes")
+        run("ip route show", escalate="sudo", verbose=args.verbose)
+        print("IPTables")
+        run("iptables -S", escalate="sudo", verbose=args.verbose)
+        print("IPTables NAT")
+        run("iptables -t nat -S", escalate="sudo", verbose=args.verbose)
+        sys.exit(0)
+
+    ns_config = load_namespace_config(ns_name[0])
+
+    print(f"Namespace {ns_config.name}:")
+    print("IP Addresses")
+    run(f"ip netns exec {ns_config.name} ip addr show", escalate="sudo")
+    print("Routes")
+    run(f"ip netns exec {ns_config.name} ip route show", escalate="sudo")
+    print("IPTables")
+    run(f"ip netns exec {ns_config.name} iptables -S", escalate="sudo")
+    print("IPTables NAT")
+    run(f"ip netns exec {ns_config.name} iptables -t nat -S", escalate="sudo")
 
 
 @dataclass
@@ -907,6 +907,11 @@ def main():
     parser_net_init = subparsers_net.add_parser("init", help="Initialize networking component")
     AddDataclassArguments(parser_net_init, NSBasicArgs)
     parser_net_init.set_defaults(func=net_init)
+
+    # net status command
+    parser_net_status = subparsers_net.add_parser("status", help="Show network status")
+    AddDataclassArguments(parser_net_status, NetStatusArgs)
+    parser_net_status.set_defaults(func=net_status_namespace, arg_cls=NetStatusArgs)
 
     # net add command
     parser_net_add = subparsers_net.add_parser("add", help="Add a networking component")
