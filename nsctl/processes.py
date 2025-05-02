@@ -1,8 +1,7 @@
-import time
 import os, shlex, subprocess, shutil
 import psutil
 from collections.abc import Mapping
-from typing import Literal
+from typing import Literal, TypedDict, NotRequired
 
 from nsctl.config import NSInfo
 from nsctl.utils import get_uid, get_gid, check_ops
@@ -162,6 +161,15 @@ def run_check(cmd: list[str] | str,
         as_user=as_user,
         working_dir=work_dir,
     )
+
+
+class RunCheckOutputArgs(TypedDict):
+    dry_run: NotRequired[bool]
+    verbose: NotRequired[bool]
+    env: NotRequired[Mapping[str, str]]
+    escalate: NotRequired[Escalate]
+    ns: NotRequired[NSInfo]
+    as_user: NotRequired[str]
 
 
 def run_check_output(cmd: list[str] | str,

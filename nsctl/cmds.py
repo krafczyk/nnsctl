@@ -11,11 +11,13 @@ from typing import Annotated, cast
 from autoparser import Arg, AddDataclassArguments, NamespaceToDataclass, DataclassType, Handler
 from nsctl.config import load_namespace_config, ns_config_base_path, \
     save_namespace_config, Namespaces, NSInfo
-from nsctl.processes import run, run_check, run_check_output, run_code_passthrough, run_code_output, \
-    find_bottom_children, process_exists, detach_and_check
+from nsctl.processes import RunCheckOutputArgs, run, run_check, run_check_output, run_code_passthrough, run_code_output, \
+    find_bottom_children, process_exists, detach_and_check, Escalate
 from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
-    disable_ip_forwarding, disable_route_localnet, extract_ipv4_address
+    disable_ip_forwarding, disable_route_localnet, extract_ipv4_address, \
+    enable_ip_forwarding, scrub_routes_and_iptables
+
 from nsctl.config import NetMacvlan
 from nsctl import VERSION
 
@@ -221,20 +223,59 @@ def net_add_macvlan(args: NetAddMacvlanArgs):
 
 
 @dataclass
-class NetRemoveMacvlanArgs(NSArgs):
+class NetRemoveMacvlanArgs(NSBasicArgs):
     dev: Annotated[str, Arg("--dev", help="Name of device to use. Otherwise it will be macvlan0", default="macvlan0")]
+
+
+def remove_macvlan(dev: NetMacvlan, ns: NSInfo, verbose: bool=False, escalate: Escalate="sudo"):
+    # Scrub ns routes and iptables
+    cmd_opts: RunCheckOutputArgs = {
+        'ns':ns,
+        'verbose': verbose,
+        'escalate': escalate
+    }
+    scrub_routes_and_iptables(dev.name, cmd_opts=cmd_opts)
+    scrub_routes_and_iptables(dev.ip, cmd_opts=cmd_opts)
+    # Scrub host routes and iptables
+    cmd_opts = {
+        'verbose': verbose,
+        'escalate': escalate
+    }
+    scrub_routes_and_iptables(dev.ip, cmd_opts=cmd_opts)
+
+    # Destroy the macvlan interface
+    run_check(
+        f"ip netns exec {ns.name} ip link del {dev.name}",
+        escalate="sudo")
 
 
 def net_remove_macvlan(args: NetRemoveMacvlanArgs):
     ns_name = args.ns_name
     # Load the namespace configuration
     ns_config = load_namespace_config(ns_name)
-    # Remove the macvlan interface
-    macvlan_name = args.dev
-    # Destroy the macvlan interface on the host
-    run_check(
-        f"ip netns exec {ns_config.name} ip link del {macvlan_name}",
-        escalate="sudo")
+
+    # Find the macvlan interface
+    i_found:int|None = None
+    macvlan: NetMacvlan|None = None
+    for i in range (len(ns_config.net)):
+        net_item = ns_config.net[i]
+        if type(net_item) is NetMacvlan:
+            if args.dev == net_item.name:
+                i_found = i
+                macvlan = net_item
+                break
+
+    if i_found is None or macvlan is None:
+        # didn't find the interface.
+        print(f"Macvlan interface {args.dev} not found in namespace {ns_name}.")
+        return
+
+    remove_macvlan(macvlan, ns=ns_config, verbose=args.verbose)
+
+    # Remove the macvlan from the namespace configuration
+    _ = ns_config.net.pop(i_found)
+    save_namespace_config(ns_name, config=ns_config)
+
 
 
 @dataclass
@@ -927,7 +968,8 @@ def main():
     subparsers_net_del = parser_net_del.add_subparsers(dest="subsubcommand", required=True)
 
     parser_net_del_macvlan = subparsers_net_del.add_parser("macvlan", help="Remove a macvlan component from the network namespace.")
-    parser_net_del_macvlan.set_defaults()
+    AddDataclassArguments(parser_net_del_macvlan, NetRemoveMacvlanArgs)
+    parser_net_del_macvlan.set_defaults(func=net_remove_macvlan)
 
     ### port-forward command
     ##parser_port_forward = subparsers.add_parser("port-forward", help="Utilities for forwarding a port between host and namespace")

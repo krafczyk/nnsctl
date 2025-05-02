@@ -1,6 +1,6 @@
 import os
 from subprocess import CalledProcessError
-from nsctl.processes import run_check_output, run_check
+from nsctl.processes import run_check_output, run_check, RunCheckOutputArgs
 import re
 
 
@@ -19,6 +19,49 @@ def get_active_ip_iface() -> tuple[str, str]:
         return iface, ip_addr
     except CalledProcessError as e:
         raise RuntimeError(f"No active non-loopback interface found. {e}")
+
+
+def scrub_routes_and_iptables(sentinel: str, cmd_opts: RunCheckOutputArgs|None=None):
+    """
+    Removes all routes and iptables entries that contain the given sentinel.
+    """
+    if cmd_opts is None:
+        cmd_opts = {"escalate": "sudo"}
+
+    # Remove routes
+    routes = run_check_output("ip route show", **cmd_opts)
+    for line in routes.splitlines():
+        # Check if the rule contains our sentinel
+        if sentinel in line:
+            print(f"Removing route: {line}")
+            # Remove the route by reusing the route specification.
+            # This may fail if additional fields cause mismatches, so you might need to adjust the parsing.
+            run_check(["ip", "route", "del"] + line.split(), **cmd_opts)
+
+    # Remove iptables rules
+    rules = run_check_output(["iptables", "-S"], **cmd_opts)
+    for rule in rules.splitlines():
+        # Check if the rule contains our sentinel
+        if sentinel in rule:
+            # We only want to delete rules that were added (lines starting with "-A")
+            if rule.startswith("-A"):
+                delete_rule = rule.replace("-A", "-D", 1)
+                cmd = ["iptables" ] + delete_rule.split()
+                run_check(cmd, **cmd_opts)
+
+    # Remove iptables NAT rules
+    rules = run_check_output(["iptables", "-t", "nat", "-S"], **cmd_opts)
+    for rule in rules.splitlines():
+        # Check if the rule contains our sentinel
+        if sentinel in rule:
+            # We only want to delte rules that were added (lines starting with "-A")
+            if rule.startswith("-A"):
+                delete_rule = rule.replace("-A", "-D", 1)
+                cmd = ["iptables", "-t", "nat"] + delete_rule.split()
+                run_check(cmd, **cmd_opts)
+
+
+
 
 
 def scrub_routes(subnet: str):
