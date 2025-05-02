@@ -18,7 +18,7 @@ from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
     disable_ip_forwarding, disable_route_localnet, extract_ipv4_address, \
     enable_ip_forwarding, scrub_routes_and_iptables
 
-from nsctl.config import NetMacvlan
+from nsctl.config import NetMacvlan, NetVeth
 from nsctl import VERSION
 
 
@@ -146,6 +146,8 @@ def net_remove(args: NSBasicArgs):
     )
 
 
+# Macvlan
+
 @dataclass
 class NetAddMacvlanArgs(NSArgs, VerboseArgs):
     dev: Annotated[str, Arg("--dev", help="Name of device to use. Otherwise it will be macvlan0", default="macvlan0")]
@@ -222,11 +224,6 @@ def net_add_macvlan(args: NetAddMacvlanArgs):
     save_namespace_config(ns_name, config=ns_config)
 
 
-@dataclass
-class NetRemoveMacvlanArgs(NSBasicArgs):
-    dev: Annotated[str, Arg("--dev", help="Name of device to use. Otherwise it will be macvlan0", default="macvlan0")]
-
-
 def remove_macvlan(dev: NetMacvlan, ns: NSInfo, verbose: bool=False, escalate: Escalate="sudo"):
     # Scrub ns routes and iptables
     cmd_opts: RunCheckOutputArgs = {
@@ -249,7 +246,12 @@ def remove_macvlan(dev: NetMacvlan, ns: NSInfo, verbose: bool=False, escalate: E
         escalate="sudo")
 
 
-def net_remove_macvlan(args: NetRemoveMacvlanArgs):
+@dataclass
+class NetDelMacvlanArgs(NSBasicArgs):
+    dev: Annotated[str, Arg("--dev", help="Name of device to use. Otherwise it will be macvlan0", default="macvlan0")]
+
+
+def net_del_macvlan(args: NetDelMacvlanArgs):
     ns_name = args.ns_name
     # Load the namespace configuration
     ns_config = load_namespace_config(ns_name)
@@ -277,6 +279,219 @@ def net_remove_macvlan(args: NetRemoveMacvlanArgs):
     save_namespace_config(ns_name, config=ns_config)
 
 
+# Veth
+
+@dataclass
+class NetAddVethArgs(NSBasicArgs):
+    host_ip: Annotated[str|None, Arg("--host-ip", help="The host if to use, if not specified, a heuristic is used to find it instead.", required=False)]
+    host_if: Annotated[str|None, Arg("--host-if", help="The host if to use, if not specified, a heuristic is used to find it instead.", required=False)]
+    ns_subnet: Annotated[str|None, Arg("--ns-subnet", help="The subnet to use, if not specified a heuristic is used to find it instead.", required=False)]
+
+
+def net_add_veth(args: NetAddVethArgs):
+    ns_name = args.ns_name
+    host_ip = args.host_ip
+    host_if = args.host_if
+    ns_subnet = args.ns_subnet
+    dry_run = args.dry_run
+
+    ns_config = load_namespace_config(ns_name)
+
+    # Assumption: ns_subnet should be like 192.168.2.0
+
+    # Auto-detect host interface and subnet if not provided
+    # TODO: Improve detection logic
+    if not host_if or not host_ip:
+        detected_if, detected_ip = get_active_ip_iface()
+        if not host_if:
+            host_if = detected_if
+        if not host_ip:
+            host_ip = detected_ip
+
+    # Use the first three octets as the subnet prefix (e.g. "192.168.1")
+    host_subnet = ".".join(host_ip.split('.')[:3])+".0"
+
+    # For ns_subnet, if not provided, generate one by incrementing the last octet of host_subnet
+    # TODO: Make this more robust
+    if not ns_subnet:
+        parts = host_subnet.split('.')
+        it = int(parts[-2])
+        it = (it + 1) % 255
+        parts[-2] = str(it)
+        ns_subnet = ".".join(parts)
+
+    ns_subnet_triplet = '.'.join(ns_subnet.split('.')[:3])
+
+    # Define veth names and assign IP addresses
+    host_veth = f"{ns_name}0"
+    ns_veth = f"{ns_name}1"
+    host_veth_ip_addr = f"{ns_subnet_triplet}.1"
+    ns_veth_ip_addr = f"{ns_subnet_triplet}.2"
+
+    print(f"Creating veth pair {host_veth} <-> {ns_veth}")
+    run_check(
+        f"ip link add {host_veth} type veth peer name {ns_veth}",
+        dry_run=dry_run,
+        verbose=args.verbose,
+        escalate="sudo")
+    print(f"Moving {ns_veth} into namespace {ns_name}")
+    run_check(
+        f"ip link set {ns_veth} netns {ns_name}",
+        dry_run=dry_run,
+        verbose=args.verbose,
+        escalate="sudo")
+
+    print("Configuring IP addresses and interfaces")
+    # Assigning IP addresses
+    run_check(
+        f"ip addr add {host_veth_ip_addr}/24 dev {host_veth}",
+        dry_run=dry_run,
+        verbose=args.verbose,
+        escalate="sudo")
+    run_check(
+        f"ip netns exec {ns_name} ip addr add {ns_veth_ip_addr}/24 dev {ns_veth}",
+        dry_run=dry_run,
+        verbose=args.verbose,
+        escalate="sudo")
+
+    # Bring up the interfaces
+    run_check(
+        f"ip link set {host_veth} up",
+        dry_run=dry_run,
+        verbose=args.verbose,
+        escalate="sudo")
+    run_check(
+        f"ip netns exec {ns_name} ip link set {ns_veth} up",
+        dry_run=dry_run,
+        verbose=args.verbose,
+        escalate="sudo")
+
+    # Add default route if one doesn't exist
+    routes = run_check_output(
+        f"ip netns exec {ns_name} ip route show",
+        dry_run=dry_run,
+        verbose=args.verbose,
+        escalate="sudo")
+
+    no_default = True
+    for line in routes.splitlines():
+        if line.startswith("default"):
+            print(f"Default route already exists in namespace {ns_name}.")
+            no_default = False
+            break
+
+    if no_default:
+        # Set default route within the namespace
+        run_check(
+            f"ip netns exec {ns_name} ip route add default via {host_veth_ip_addr}",
+            dry_run=dry_run,
+            verbose=args.verbose,
+            escalate="sudo")
+
+    print("Enabling IP forwarding")
+    enable_ip_forwarding(
+        dry_run=dry_run)
+
+    print("Setting iptables routing rules")
+    run_check(
+        f"iptables -I FORWARD -i {host_veth} -o {host_if} -j ACCEPT",
+        verbose=args.verbose,
+        escalate="sudo")
+    run_check(
+        f"iptables -I FORWARD -i {host_if} -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT",
+        verbose=args.verbose,
+        escalate="sudo")
+    run_check(
+        f"iptables -t nat -A POSTROUTING -s {ns_subnet}/24 -o {host_if} -j MASQUERADE",
+        dry_run=dry_run,
+        verbose=args.verbose,
+        escalate="sudo")
+
+    # Allow forwarding from the namespace veth to the loopback interface, useful for port forwarding
+    run_check(
+        f"iptables -A FORWARD -i lo -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT",
+        dry_run=dry_run,
+        verbose=args.verbose,
+        escalate="sudo")
+
+    veth_config = NetVeth(
+        kind="veth",
+        host_veth=host_veth,
+        ns_veth=ns_veth,
+        host_veth_ip=host_veth_ip_addr,
+        ns_veth_ip=ns_veth_ip_addr,
+        host_if=host_if,
+        host_ip=host_ip,
+        host_subnet=host_subnet,
+        ns_subnet=ns_subnet
+    )
+
+    ns_config.net.append(veth_config)
+    save_namespace_config(ns_name, config=ns_config)
+
+
+def remove_veth(dev: NetVeth, ns: NSInfo, verbose: bool=False, escalate: Escalate="sudo"):
+    # Scrub ns routes and iptables
+    ns_cmd_opts: RunCheckOutputArgs = {
+        'ns':ns,
+        'verbose': verbose,
+        'escalate': escalate
+    }
+
+    scrub_routes_and_iptables(dev.ns_veth, cmd_opts=ns_cmd_opts)
+    scrub_routes_and_iptables(dev.ns_veth_ip, cmd_opts=ns_cmd_opts)
+    # Scrub host routes and iptables
+    host_cmd_opts: RunCheckOutputArgs = {
+        'verbose': verbose,
+        'escalate': escalate
+    }
+    # Automatically removed after the first?
+    #scrub_routes_and_iptables(dev.host_veth, cmd_opts=host_cmd_opts)
+    scrub_routes_and_iptables(dev.host_veth_ip, cmd_opts=host_cmd_opts)
+
+    # Destroy the veth interface
+    run_check(
+        f"ip netns exec {ns.name} ip link del {dev.ns_veth}",
+        verbose=verbose,
+        escalate="sudo")
+    run_check(
+        f"ip link del {dev.host_veth}",
+        verbose=verbose,
+        escalate="sudo")
+
+
+@dataclass
+class NetDelVethArgs(NSBasicArgs):
+    host_dev: Annotated[str, Arg("--host-dev", help="Name of host device to use.")]
+    ns_dev: Annotated[str, Arg("--ns-dev", help="Name of namespace device to use.")]
+
+
+def net_del_veth(args: NetDelVethArgs):
+    ns_name = args.ns_name
+    # Load the namespace configuration
+    ns_config = load_namespace_config(ns_name)
+
+    # Find the macvlan interface
+    i_found:int|None = None
+    veth: NetVeth|None = None
+    for i in range (len(ns_config.net)):
+        net_item = ns_config.net[i]
+        if type(net_item) is NetVeth:
+            if args.host_dev == net_item.host_veth and args.ns_dev == net_item.ns_veth:
+                i_found = i
+                veth = net_item
+                break
+
+    if i_found is None or veth is None:
+        # didn't find the interface.
+        print(f"Veth interface {args.host_dev} (host) <-> {args.ns_dev} (ns) not found.")
+        return
+
+    remove_veth(veth, ns=ns_config, verbose=args.verbose)
+
+    # Remove the veth from the namespace configuration
+    _ = ns_config.net.pop(i_found)
+    save_namespace_config(ns_name, config=ns_config)
 
 @dataclass
 class CreateNSArgs(NSBasicArgs):
@@ -521,118 +736,7 @@ def ps(args: PSArgs):
     _ = subprocess.run(cmd)
 
 
-# def create_namespace_old(args):
-#     ns_name = args.ns_name
-#     host_ip = args.host_ip
-#     host_if = args.host_if
-#     ns_subnet = args.ns_subnet
-#     dry_run = args.dry_run
 
-#     # Assumption: ns_subnet should be like 192.168.2.0
-
-#     # Auto-detect host interface and subnet if not provided
-#     # TODO: Improve detection logic
-#     if not host_if or not host_ip:
-#         detected_if, detected_ip = get_active_ip_iface()
-#         if not host_if:
-#             host_if = detected_if
-#         if not host_ip:
-#             host_ip = detected_ip
-#             # Use the first three octets as the subnet prefix (e.g. "192.168.1")
-#             host_subnet = ".".join(host_ip.split('.')[:3])+".0"
-#     else:
-#         host_subnet = host_ip.split('.')[:3] + ".0"
-
-#     # For ns_subnet, if not provided, generate one by incrementing the last octet of host_subnet
-#     # TODO: Make this more robust
-#     if not ns_subnet:
-#         parts = host_subnet.split('.')
-#         it = int(parts[-2])
-#         it = (it + 1) % 255
-#         parts[-2] = str(it)
-#         ns_subnet = ".".join(parts)
-
-#     ns_subnet_triplet = '.'.join(ns_subnet.split('.')[:3])
-
-#     # Define veth names and assign IP addresses
-#     host_veth = f"{ns_name}0"
-#     ns_veth = f"{ns_name}1"
-#     host_veth_ip_addr = f"{ns_subnet_triplet}.1"
-#     ns_veth_ip_addr = f"{ns_subnet_triplet}.2"
-
-#     # Check if namespace already exists
-#     existing = run_cmd("ip netns list", capture_output=True).stdout
-#     if ns_name in existing:
-#         print(f"Namespace {ns_name} already exists.")
-#         sys.exit(1)
-
-#     # Create configuration directory and file
-#     config_dir = f"{ns_config_base_path}/{ns_name}"
-#     config_file = os.path.join(config_dir, "configuration.conf")
-#     if not dry_run:
-#         os.makedirs(config_dir, exist_ok=True)
-#     else:
-#         print(f"Would create directory {config_dir}")
-
-#     print(f"Creating network namespace {ns_name}")
-#     run_cmd_sudo(f"ip netns add {ns_name}", dry_run=dry_run)
-#     print(f"Creating veth pair {host_veth} <-> {ns_veth}")
-#     run_cmd_sudo(f"ip link add {host_veth} type veth peer name {ns_veth}", dry_run=dry_run)
-#     print(f"Moving {ns_veth} into namespace {ns_name}")
-#     run_cmd_sudo(f"ip link set {ns_veth} netns {ns_name}", dry_run=dry_run)
-
-#     print("Configuring IP addresses and interfaces")
-#     # Assigning IP addresses
-#     run_cmd_sudo(f"ip addr add {host_veth_ip_addr}/24 dev {host_veth}", dry_run=dry_run)
-#     run_cmd_sudo(f"ip netns exec {ns_name} ip addr add {ns_veth_ip_addr}/24 dev {ns_veth}", dry_run=dry_run)
-
-#     # Bring up the interfaces
-#     run_cmd_sudo(f"ip link set {host_veth} up", dry_run=dry_run)
-#     run_cmd_sudo(f"ip netns exec {ns_name} ip link set {ns_veth} up", dry_run=dry_run)
-#     run_cmd_sudo(f"ip netns exec {ns_name} ip link set lo up", dry_run=dry_run)
-
-#     # Set default route within the namespace
-#     run_cmd_sudo(f"ip netns exec {ns_name} ip route add default via {host_veth_ip_addr}", dry_run=dry_run)
-
-#     print("Enabling IP forwarding")
-#     enable_ip_forwarding(dry_run=dry_run)
-
-#     # Use provided host_ip if given; otherwise, auto-detect
-#     if args.host_ip:
-#         host_ip = args.host_ip
-#     else:
-#         _, detected_ip = get_active_ip_iface()
-#         host_ip = detected_ip
-
-#     print("Setting iptables routing rules")
-#     run_cmd_sudo(f"iptables -I FORWARD -i {host_veth} -o {host_if} -j ACCEPT")
-#     run_cmd_sudo(f"iptables -I FORWARD -i {host_if} -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT")
-#     run_cmd_sudo(f"iptables -t nat -A POSTROUTING -s {ns_subnet}/24 -o {host_if} -j MASQUERADE", dry_run=dry_run)
-
-#     # Allow forwarding from the namespace veth to the loopback interface, useful for port forwarding
-#     run_cmd_sudo(f"iptables -A FORWARD -i lo -o {host_veth} -m state --state RELATED,ESTABLISHED -j ACCEPT")
-
-
-#     config_data = {
-#         "ns_name": ns_name,
-#         "host_veth": host_veth,
-#         "ns_veth": ns_veth,
-#         "host_veth_ip_addr": host_veth_ip_addr,
-#         "ns_veth_ip_addr": ns_veth_ip_addr,
-#         "host_if": host_if,
-#         "host_ip": host_ip,
-#         "host_subnet": host_subnet,
-#         "ns_subnet": ns_subnet,
-#     }
-
-#     # Save the configuration to file for later use
-#     if not dry_run:
-#         with open(config_file, "w") as f:
-#             f.write(json.dumps(config_data))
-#         print(f"Namespace {ns_name} created with configuration saved in {config_file}")
-#     else:
-#         print(f"Would write the following to {config_file}")
-#         pprint(config_data)
 
 
 @dataclass
@@ -963,13 +1067,24 @@ def main():
     AddDataclassArguments(parser_net_add_macvlan, NetAddMacvlanArgs)
     parser_net_add_macvlan.set_defaults(func=net_add_macvlan, arg_cls=NetAddMacvlanArgs)
 
+    # net add veth command
+    parser_net_add_veth = subparsers_net_add.add_parser("veth", help="Add a veth component to the network namespace.")
+    AddDataclassArguments(parser_net_add_veth, NetAddVethArgs)
+    parser_net_add_veth.set_defaults(func=net_add_veth, arg_cls=NetAddVethArgs)
+
     # net del command
     parser_net_del = subparsers_net.add_parser("del", help="Remove a networking component")
     subparsers_net_del = parser_net_del.add_subparsers(dest="subsubcommand", required=True)
 
+    # net del macvlan command
     parser_net_del_macvlan = subparsers_net_del.add_parser("macvlan", help="Remove a macvlan component from the network namespace.")
-    AddDataclassArguments(parser_net_del_macvlan, NetRemoveMacvlanArgs)
-    parser_net_del_macvlan.set_defaults(func=net_remove_macvlan)
+    AddDataclassArguments(parser_net_del_macvlan, NetDelMacvlanArgs)
+    parser_net_del_macvlan.set_defaults(func=net_del_macvlan)
+
+    # net del veth command
+    parser_net_del_veth = subparsers_net_del.add_parser("veth", help="Remove a veth component from the network namespace.")
+    AddDataclassArguments(parser_net_del_veth, NetDelVethArgs)
+    parser_net_del_veth.set_defaults(func=net_del_veth, arg_cls=NetDelVethArgs)
 
     ### port-forward command
     ##parser_port_forward = subparsers.add_parser("port-forward", help="Utilities for forwarding a port between host and namespace")

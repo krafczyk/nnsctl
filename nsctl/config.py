@@ -25,6 +25,17 @@ class NetMacvlan(BaseModel):
     ip: str
 
 
+class NetVeth(BaseModel):
+    kind: Literal["veth"]
+    host_veth: str
+    ns_veth: str
+    host_veth_ip: str
+    ns_veth_ip: str
+    host_if: str
+    host_ip: str
+    host_subnet: str
+    ns_subnet: str
+
 class NetHostForward(BaseModel):
     kind: Literal["host_forward"]
     host_ip: str
@@ -33,7 +44,7 @@ class NetHostForward(BaseModel):
 
 
 NetItem = Annotated[
-    NetMacvlan | NetHostForward,
+    NetMacvlan | NetHostForward | NetVeth,
     Field(discriminator="kind")
 ]
 
