@@ -5,6 +5,7 @@ import time
 import psutil
 import argparse
 import shutil
+import re
 from pprint import pprint
 from dataclasses import dataclass
 from typing import Annotated, cast
@@ -16,7 +17,7 @@ from nsctl.processes import RunCheckOutputArgs, run, run_check, run_check_output
 from nsctl.utils import check_ops
 from nsctl.network import get_active_ip_iface, is_ip_forwarding_enabled, \
     disable_ip_forwarding, disable_route_localnet, extract_ipv4_address, \
-    enable_ip_forwarding, scrub_routes_and_iptables
+    enable_ip_forwarding, enable_route_localnet, scrub_routes_and_iptables
 
 from nsctl.config import NetMacvlan, NetVeth
 from nsctl import VERSION
@@ -886,6 +887,102 @@ def exec_in_namespace(args: ExecArgs):
         verbose=args.verbose))
 
 
+def add_port_forward(ns: NSInfo, ports: str, host_veth_ip_addr: str, ns_veth_ip_addr: str, host_veth: str, ns_veth: str, verbose:bool=False, dry_run:bool=False):
+    # Validate the ports string. We should allow number or number-number.
+    ports_re = re.compile(r"^(\d+)(?:-(\d+))?$")
+    if not ports_re.match(ports):
+        raise ValueError(f"Invalid port range: {ports}")
+
+    ports_1 = ports.replace('-', ':')
+    #ports_2 = ports
+
+    ## Rules inside the namespace (explanation from Gemini)
+    run_check(
+        f"ip netns exec {ns.name} iptables -t nat -A OUTPUT -p tcp -d 127.0.0.1 --dport {ports_1} -j DNAT --to-destination {host_veth_ip_addr}",
+        verbose=verbose,
+        dry_run=dry_run,
+        escalate="sudo")
+    run_check(
+        f"ip netns exec {ns.name} iptables -t nat -A POSTROUTING -o {ns_veth} -s 127.0.0.1 -d {host_veth_ip_addr} -p tcp --dport {ports_1} -j SNAT --to-source {ns_veth_ip_addr}",
+        verbose=verbose,
+        dry_run=dry_run,
+        escalate="sudo")
+    ## Rules inside the host namespace
+    run_check(
+        f"iptables -A FORWARD -i {host_veth} -o lo -p tcp  -d 127.0.0.1 --dport {ports_1} -j ACCEPT",
+        verbose=verbose,
+        dry_run=dry_run,
+        escalate="sudo")
+    run_check(f"iptables -t nat -A PREROUTING -i {host_veth} -p tcp --dport {ports_1} -j DNAT --to-destination 127.0.0.1",
+        verbose=verbose,
+        dry_run=dry_run,
+        escalate="sudo")
+    run_check(
+        f"iptables -t nat -A POSTROUTING -o lo -p tcp -d 127.0.0.1 --dport {ports_1} -s {ns_veth_ip_addr} -j SNAT --to-source 127.0.0.1",
+        verbose=verbose,
+        dry_run=dry_run,
+        escalate="sudo")
+    print("Port forwarding rules added.")
+    enable_route_localnet(host_veth)
+    enable_route_localnet(ns_veth, ns_name=ns.name)
+    print(f"Enabled route_localnet for host interface {host_veth} and namespace interface {ns_veth}.")
+
+
+@dataclass
+class PortForwardAddArgs(NSBasicArgs):
+    host_veth: Annotated[str|None, Arg("--host-veth", help="The veth interface to use on the host side for port forwarding.", required=False)]
+    ns_veth: Annotated[str|None, Arg("--ns-veth", help="The veth interface to use on the ns side for port forwarding.", required=False)]
+    ports: Annotated[str, Arg("--ports", help="The ports to forward. Can be a single port or a range (e.g. 8080-8090).", default="8080")]
+
+
+def net_add_port_forward(args: PortForwardAddArgs):
+    ns_config = load_namespace_config(args.ns_name)
+    veth:NetVeth|None = None
+    if args.host_veth is None and args.ns_veth is None:
+        # Use the first veth interface in the namespace
+        for i in range (len(ns_config.net)):
+            net_item = ns_config.net[i]
+            if type(net_item) is NetVeth:
+                veth = net_item
+                break
+
+    elif args.host_veth is None or args.ns_veth is None:
+        if args.host_veth is None:
+            ns_veth = args.ns_veth
+            for i in range (len(ns_config.net)):
+                net_item = ns_config.net[i]
+                if type(net_item) is NetVeth and net_item.ns_veth == ns_veth:
+                    veth = net_item
+                    break
+        else:
+            host_veth = args.host_veth
+            for i in range (len(ns_config.net)):
+                net_item = ns_config.net[i]
+                if type(net_item) is NetVeth and net_item.host_veth == host_veth:
+                    veth = net_item
+                    break
+    else:
+        for i in range (len(ns_config.net)):
+            net_item = ns_config.net[i]
+            if type(net_item) is NetVeth and net_item.host_veth == args.host_veth and net_item.ns_veth == args.ns_veth:
+                veth = net_item
+                break
+
+    if veth is None:
+        raise RuntimeError(f"No veth interface found in namespace {ns_config.name}.")
+
+    add_port_forward(
+        ns_config,
+        args.ports,
+        veth.host_veth_ip,
+        veth.ns_veth_ip,
+        veth.host_veth,
+        veth.ns_veth,
+        verbose=args.verbose,
+        dry_run=args.dry_run
+    )
+
+
 #def port_forward_add(args):
 #    ns_name = args.ns_name
 #    port = args.port
@@ -898,16 +995,6 @@ def exec_in_namespace(args: ExecArgs):
 #    host_veth = namespace_config["host_veth"]
 #    ns_veth = namespace_config["ns_veth"]
 #    print(f"Forwarding port {port}")
-#    ## Rules inside the namespace (explanation from Gemini)
-#    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -A OUTPUT -p tcp -d 127.0.0.1 --dport {port} -j DNAT --to-destination {host_veth_ip_addr}")
-#    run_cmd(f"sudo ip netns exec {ns_name} iptables -t nat -A POSTROUTING -o {ns_veth} -s 127.0.0.1 -d {host_veth_ip_addr} -p tcp --dport {port} -j SNAT --to-source {ns_veth_ip_addr}")
-#    ## Rules inside the host namespace
-#    run_cmd(f"sudo iptables -A FORWARD -i {host_veth} -o lo -p tcp  -d 127.0.0.1 --dport {port} -j ACCEPT")
-#    run_cmd(f"sudo iptables -t nat -A PREROUTING -i {host_veth} -p tcp --dport {port} -j DNAT --to-destination 127.0.0.1")
-#    run_cmd(f"sudo iptables -t nat -A POSTROUTING -o lo -p tcp -d 127.0.0.1 --dport {port} -s {ns_veth_ip_addr} -j SNAT --to-source 127.0.0.1")
-#    print("Port forwarding rules added.")
-#    enable_route_localnet(host_veth)
-#    print(f"Enabled route_localnet for host interface {host_veth}.")
 
 
 #def port_forward_del(args):
@@ -929,8 +1016,6 @@ def exec_in_namespace(args: ExecArgs):
 #    run_cmd(f"sudo iptables -t nat -D POSTROUTING -o lo -p tcp -d 127.0.0.1 --dport {port} -s {ns_veth_ip_addr} -j SNAT --to-source 127.0.0.1", skip_error=True)
 #    print(f"Port forwarding rules for port {port} removed.")
 
-#x_ports_1 = "6000:6100"
-#x_ports_2 = "6000-6100"
 
 #def x_forward_add(args):
 #    ns_name = args.ns_name
@@ -1072,6 +1157,11 @@ def main():
     AddDataclassArguments(parser_net_add_veth, NetAddVethArgs)
     parser_net_add_veth.set_defaults(func=net_add_veth, arg_cls=NetAddVethArgs)
 
+    # port-forward add command
+    parser_net_add_port_forward = subparsers_net_add.add_parser("port-forward", help="Add port forwarding for a particular port or set of ports")
+    AddDataclassArguments(parser_net_add_port_forward, PortForwardAddArgs)
+    parser_net_add_port_forward.set_defaults(func=net_add_port_forward)
+
     # net del command
     parser_net_del = subparsers_net.add_parser("del", help="Remove a networking component")
     subparsers_net_del = parser_net_del.add_subparsers(dest="subsubcommand", required=True)
@@ -1085,18 +1175,6 @@ def main():
     parser_net_del_veth = subparsers_net_del.add_parser("veth", help="Remove a veth component from the network namespace.")
     AddDataclassArguments(parser_net_del_veth, NetDelVethArgs)
     parser_net_del_veth.set_defaults(func=net_del_veth, arg_cls=NetDelVethArgs)
-
-    ### port-forward command
-    ##parser_port_forward = subparsers.add_parser("port-forward", help="Utilities for forwarding a port between host and namespace")
-    ##port_forward_subparsers = parser_port_forward.add_subparsers(dest="subcommand", required=True)
-
-    ### port-forward add command
-    ##parser_port_forward_add = port_forward_subparsers.add_parser("add", help="Add port forwarding for a particular port")
-    ##parser_port_forward_add.add_argument("ns_name", help=ns_name_help)
-    ##parser_port_forward_add.add_argument("port", type=int, help="Port number to forward")
-    ##add_dry_run(parser_port_forward_add)
-    ###parser_port_forward_add.set_defaults(func=port_forward_add)
-    ##parser_port_forward_add.set_defaults(func=currently_not_implemented)
 
     ### port-forward del command
     ##parser_port_forward_del = port_forward_subparsers.add_parser("del", help="Delete port forwarding for a particular port")
