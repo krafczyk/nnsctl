@@ -768,45 +768,48 @@ def destroy_namespace(args: DestroyNSArgs):
         # Remove the network namespace links
         net_remove(NSBasicArgs(ns_name=ns_config.name, dry_run=args.dry_run, verbose=args.verbose))
 
-    print(f"Seeing if there are still processes in the namespace {ns_name}")
-    owner_pid = ns_config.pid
+    if ns_config.namespaces.is_nonhost():
+        print(f"Seeing if there are still processes in the namespace {ns_name}")
+        owner_pid = ns_config.pid
 
-    namespaced_pids = get_namespaced_pids(owner_pid)
-    pids = [ p for p in namespaced_pids if p != owner_pid ]
+        namespaced_pids = get_namespaced_pids(owner_pid)
+        pids = [ p for p in namespaced_pids if p != owner_pid ]
 
-    def prune_processes(pids: list[int]) -> list[int]:
-        """Prune processes that are no longer running"""
-        return [p for p in pids if process_exists(p)]
+        def prune_processes(pids: list[int]) -> list[int]:
+            """Prune processes that are no longer running"""
+            return [p for p in pids if process_exists(p)]
 
-    if pids and not force:
-        print("The following processes are still running in the namespace:")
-        for pid in pids:
-            print(pid)
-        print("Use --force to kill these processes and proceed with destroying the namespace.")
-        sys.exit(1)
+        if pids and not force:
+            print("The following processes are still running in the namespace:")
+            for pid in pids:
+                print(pid)
+            print("Use --force to kill these processes and proceed with destroying the namespace.")
+            sys.exit(1)
 
-    elif pids and force:
-        print("Killing processes in the namespace:")
-        run_check(["kill", "-TERM"]+list(map(str, pids)), escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
-        time.sleep(5)
-        pids = prune_processes(pids)
-        if pids:
-            run_check(["kill", "-KILL"]+list(map(str,pids)), escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
-        time.sleep(5)
-        pids = prune_processes(pids)
-        if pids:
-            raise RuntimeError(f"Failed to kill processes in namespace {ns_name}. Some processes are still running: {pids}")
+        elif pids and force:
+            print("Killing processes in the namespace:")
+            run_check(["kill", "-TERM"]+list(map(str, pids)), escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
+            time.sleep(5)
+            pids = prune_processes(pids)
+            if pids:
+                run_check(["kill", "-KILL"]+list(map(str,pids)), escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
+            time.sleep(5)
+            pids = prune_processes(pids)
+            if pids:
+                raise RuntimeError(f"Failed to kill processes in namespace {ns_name}. Some processes are still running: {pids}")
 
-    if process_exists(owner_pid):
-        # Delete the namespace
-        run_check(["kill", "-TERM", str(owner_pid)], escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
-        time.sleep(5)
         if process_exists(owner_pid):
-            run_check(["kill", "-KILL", str(owner_pid)], escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
-        time.sleep(5)
-        if process_exists(owner_pid):
-            raise RuntimeError(f"Failed to kill the namespace process {owner_pid}. It is still running.")
-        print(f"Namespace {ns_name} destroyed.")
+            # Delete the namespace
+            run_check(["kill", "-TERM", str(owner_pid)], escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
+            time.sleep(5)
+            if process_exists(owner_pid):
+                run_check(["kill", "-KILL", str(owner_pid)], escalate=escalate, dry_run=args.dry_run, verbose=args.verbose)
+            time.sleep(5)
+            if process_exists(owner_pid):
+                raise RuntimeError(f"Failed to kill the namespace process {owner_pid}. It is still running.")
+            print(f"Namespace {ns_name} destroyed.")
+    else:
+        print(f"This namespace is not different from the host. Not pruning processes")
 
     # # Remove the DNS configuration for the namespace
     # ns_resolv_dir = f"/etc/netns/{ns_name}"

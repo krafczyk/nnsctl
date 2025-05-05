@@ -17,6 +17,17 @@ class Namespaces(BaseModel):
     cgroup: bool
     time: bool
 
+    def is_nonhost(self):
+        return any([
+            self.net,
+            self.mount,
+            self.pid,
+            self.ipc,
+            self.uts,
+            self.user,
+            self.cgroup,
+            self.time])
+
 
 class NetMacvlan(BaseModel):
     kind: Literal["macvlan"]
