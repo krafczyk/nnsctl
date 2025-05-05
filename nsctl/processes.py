@@ -1,7 +1,12 @@
 import os, shlex, subprocess, shutil
 import psutil
 from collections.abc import Mapping
-from typing import Literal, TypedDict, NotRequired
+from typing import Literal
+
+try:
+    from typing import TypedDict, NotRequired
+except ImportError:
+    from typing_extensions import TypedDict, NotRequired
 
 from nsctl.config import NSInfo
 from nsctl.utils import get_uid, get_gid, check_ops
