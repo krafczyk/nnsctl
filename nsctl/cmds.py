@@ -757,7 +757,11 @@ def destroy_namespace(args: DestroyNSArgs):
         escalate = None
 
     # Get the namespace configuration
-    ns_config = load_namespace_config(ns_name)
+    try:
+        ns_config = load_namespace_config(ns_name)
+    except FileNotFoundError:
+        print(f"Namespace {ns_name} doesn't exist.")
+        sys.exit(1)
     print(f"Destroying network namespace {ns_name}")
 
     if ns_config.namespaces.net:
